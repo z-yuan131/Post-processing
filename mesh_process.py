@@ -13,7 +13,7 @@ import matplotlib.pyplot as plt
 class Region(Base):
     def __init__(self, argv):
         super().__init__(argv)
-        self.layers = 0
+        self.layers = 20
         self.suffix = ['hex']
         self.AOA = -3
         self.boundary_name = ['wall']
@@ -30,6 +30,7 @@ class Region(Base):
     def get_boundary(self):
         mesh_wall = defaultdict(list)
         mesh_wall_tag = list()
+        con_new = defaultdict(list)
         # Get first level wall mesh
         for key in self.mesh:
             keyword = key.split('_')
@@ -44,21 +45,23 @@ class Region(Base):
                             # Tag all elements in the set as belonging to the first layer
                             if isinstance(mesh_wall_tag, list):
                                 mesh_wall_tag = {part: {(etype, eid): 0}}
-                                #tag = {(part, eid): {part: eid}}
+                                con_new[f'bcon_{bname}_{part}'].append((etype, eid))
                             elif part in mesh_wall_tag:
                                 mesh_wall_tag[part].update({(etype, eid): 0})
+                                con_new[f'bcon_{bname}_{part}'].append((etype, eid))
                             else:
                                 mesh_wall_tag.update({part: {(etype, eid): 0}})
+                                con_new[f'bcon_{bname}_{part}'].append((etype, eid))
 
 
         #print(np.sum([len(mesh_wall[i]) for i in mesh_wall]))
-        return mesh_wall_tag, mesh_wall
+        return mesh_wall_tag, mesh_wall, con_new
 
 
 
     def get_wall_O_grid(self):
         # Get O-grid meshes
-        mesh_wall_tag, mesh_wall = self.get_boundary()
+        mesh_wall_tag, mesh_wall, con_new = self.get_boundary()
 
         # For single rank process, we'd better to pre load connectivities
         con = defaultdict(list)
@@ -93,12 +96,13 @@ class Region(Base):
                     if mesh_wall_tag[part].get(l, -1) == i and r not in mesh_wall_tag[part]:
                         mesh_wall_tag[part].update({r: i + 1})
                         mesh_wall[f'spt_{r[0]}_{part}'].append(r[1])
+                        con_new[f'con_{part}'].append((l,r))
 
 
                     elif mesh_wall_tag[part].get(r, -1) == i and l not in mesh_wall_tag[part]:
                         mesh_wall_tag[part].update({l: i + 1})
                         mesh_wall[f'spt_{l[0]}_{part}'].append(l[1])
-
+                        con_new[f'con_{part}'].append((l,r))
 
                 # Grow our element set by considering adjacent partitions
                 for p, (pc, pcr, sb) in pcon[part].items():
@@ -109,10 +113,14 @@ class Region(Base):
                             if b and r not in mesh_wall_tag[f'{p}']:
                                 mesh_wall_tag[f'{p}'].update({r: i + 1})
                                 mesh_wall[f'spt_{r[0]}_{p}'].append(r[1])
+                                con_new[f'con_{part}{p}'].append(l)
+                                con_new[f'con_{p}{part}'].append(r)
 
                         except  KeyError:
                                 mesh_wall_tag.update({f'{p}': {r: i + 1}})
                                 mesh_wall[f'spt_{r[0]}_{p}'].append(r[1])
+                                con_new[f'con_{part}{p}'].append(l)
+                                con_new[f'con_{p}{part}'].append(r)
 
 
         #print(mesh_wall.keys())
@@ -121,7 +129,7 @@ class Region(Base):
         #    mesh = self.mesh[key][:,mesh_wall[key],:2]
         #    plt.plot(mesh[...,0],mesh[...,1],'.')
         #plt.show()
-        return mesh_wall_tag, mesh_wall
+        return mesh_wall_tag, mesh_wall, con_new
 
     def load_connectivity(self, part):
 
@@ -156,8 +164,10 @@ class SpanAverage(Region):
         super().__init__(argv)
         self.tol = 1e-6
 
+        raise NotImplementedError("Haven't finished yet")
+
     def reorder(self):
-        mesh_wall_tag, mesh_wall = self.get_wall_O_grid()
+        mesh_wall_tag, mesh_wall, con_new = self.get_wall_O_grid()
 
         # Reduce/reorder connectivities
 
@@ -168,15 +178,20 @@ class SpanAverage(Region):
             index = list(set(index))
 
             index = np.array(mesh_wall[key])[index]
+            """
             try:
                 mesh_prio = np.append(mesh_prio,self.mesh[key][0,index,:2],axis = 0)
             except UnboundLocalError:
                 mesh_prio = self.mesh[key][0,index,:2]
+            """
+            print(index)
+            raise RuntimeError
 
         #print(mesh_prio.shape)
         #plt.figure()
         #plt.plot(mesh_prio[:,0],mesh_prio[:,-1],'.')
         #plt.show()
+        #raise RuntimeError
 
         index = defaultdict(list)
         for key in mesh_wall:

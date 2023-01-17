@@ -14,13 +14,13 @@ class Base(object):
     def __init__(self, avg):
 
         # Time series
-        self.get_time_series(avg[2])
+        self.get_time_series(avg['series_time'])
 
         # Define mesh name and solution name
-        self.name = name = [avg[0],f'{avg[1]}_{self.time[0]}.pyfrs']
+        self.name = name = [avg['mesh'],f"{avg['soln']}_{self.time[0]}.pyfrs"]
 
         # solution dirctory
-        self.solndir = avg[1]
+        self.solndir = avg['soln']
 
         self.mesh = NativeReader(name[0])
         self.soln = NativeReader(name[1])
@@ -102,6 +102,3 @@ class Base(object):
 
     def _get_order(self, name, nspts):
         return self._get_shape(name, nspts, self.cfg).order_from_nspts(nspts)
-
-
-    
