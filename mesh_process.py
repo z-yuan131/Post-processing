@@ -13,7 +13,7 @@ import matplotlib.pyplot as plt
 class Region(Base):
     def __init__(self, argv):
         super().__init__(argv)
-        self.layers = 20
+        self.layers = 10
         self.suffix = ['hex']
         self.AOA = -3
         self.boundary_name = ['wall']
@@ -61,10 +61,11 @@ class Region(Base):
 
     def get_wall_O_grid(self):
         # Get O-grid meshes
-        mesh_wall_tag, mesh_wall, con_new = self.get_boundary()
+        mesh_wall_tag, mesh_wall, bcon = self.get_boundary()
 
         # For single rank process, we'd better to pre load connectivities
         con = defaultdict(list)
+        con_new = defaultdict(list)
         pcon = {}
         for part in self.suffix_parts:
 
@@ -96,13 +97,13 @@ class Region(Base):
                     if mesh_wall_tag[part].get(l, -1) == i and r not in mesh_wall_tag[part]:
                         mesh_wall_tag[part].update({r: i + 1})
                         mesh_wall[f'spt_{r[0]}_{part}'].append(r[1])
-                        con_new[f'con_{part}'].append((l,r))
+                        con_new[f'{part}_{part}'].append((l,r))
 
 
                     elif mesh_wall_tag[part].get(r, -1) == i and l not in mesh_wall_tag[part]:
                         mesh_wall_tag[part].update({l: i + 1})
                         mesh_wall[f'spt_{l[0]}_{part}'].append(l[1])
-                        con_new[f'con_{part}'].append((l,r))
+                        con_new[f'{part}_{part}'].append((l,r))
 
                 # Grow our element set by considering adjacent partitions
                 for p, (pc, pcr, sb) in pcon[part].items():
@@ -113,22 +114,15 @@ class Region(Base):
                             if b and r not in mesh_wall_tag[f'{p}']:
                                 mesh_wall_tag[f'{p}'].update({r: i + 1})
                                 mesh_wall[f'spt_{r[0]}_{p}'].append(r[1])
-                                con_new[f'con_{part}{p}'].append(l)
-                                con_new[f'con_{p}{part}'].append(r)
+                                con_new[f'{part}_{p}'].append(l)
+                                con_new[f'{p}_{part}'].append(r)
 
                         except  KeyError:
                                 mesh_wall_tag.update({f'{p}': {r: i + 1}})
                                 mesh_wall[f'spt_{r[0]}_{p}'].append(r[1])
-                                con_new[f'con_{part}{p}'].append(l)
-                                con_new[f'con_{p}{part}'].append(r)
+                                con_new[f'{part}_{p}'].append(l)
+                                con_new[f'{p}_{part}'].append(r)
 
-
-        #print(mesh_wall.keys())
-        #plt.figure()
-        #for key in mesh_wall:
-        #    mesh = self.mesh[key][:,mesh_wall[key],:2]
-        #    plt.plot(mesh[...,0],mesh[...,1],'.')
-        #plt.show()
         return mesh_wall_tag, mesh_wall, con_new
 
     def load_connectivity(self, part):
@@ -160,101 +154,170 @@ class Region(Base):
 
 
 class SpanAverage(Region):
+
     def __init__(self, argv):
         super().__init__(argv)
         self.tol = 1e-6
 
-        raise NotImplementedError("Haven't finished yet")
 
     def reorder(self):
-        mesh_wall_tag, mesh_wall, con_new = self.get_wall_O_grid()
+        mesh_wall_tag, mesh_wall, con = self.get_wall_O_grid()
 
-        # Reduce/reorder connectivities
 
         # Collect one periodic boundary
+        eidp = defaultdict()
         amin = min([np.min(self.mesh[key][...,-1]) for key in mesh_wall])
         for key in mesh_wall:
             index = np.where(abs(self.mesh[key][:,mesh_wall[key],-1] - amin) < self.tol)[1]
             index = list(set(index))
 
-            index = np.array(mesh_wall[key])[index]
-            """
+            eidp[key] = np.array(mesh_wall[key])[index]
             try:
-                mesh_prio = np.append(mesh_prio,self.mesh[key][0,index,:2],axis = 0)
+                mesh_prio = np.append(mesh_prio,self.mesh[key][0,eidp[key],:2],axis = 0)
             except UnboundLocalError:
-                mesh_prio = self.mesh[key][0,index,:2]
-            """
-            print(index)
-            raise RuntimeError
+                mesh_prio = self.mesh[key][0,eidp[key],:2]
 
-        #print(mesh_prio.shape)
-        #plt.figure()
-        #plt.plot(mesh_prio[:,0],mesh_prio[:,-1],'.')
-        #plt.show()
-        #raise RuntimeError
+        # Reduce/reorder connectivities
+        con_new = defaultdict(list)
+        for key in mesh_wall:
+            _, etype, part = key.split('_')
+            for kk in con:
+                if kk.split('_')[0] == part:
+                    if kk.split('_')[-1] == part:
+                        for l,r in con[kk]:
+                            if l[1] in eidp[key] and r[1] in eidp[key]:
+                                con_new[kk].append((l,r))
+                    else:
+                        p = kk.split('_')[-1]
+                        nkey = f'{_}_{etype}_{p}'
+                        nk = f'{p}_{part}'
+                        for l,r in zip(con[kk],con[nk]):
+                            if l[1] in eidp[key] and r[1] in eidp[nkey]:
+                                con_new[kk].append(l)
 
-        index = defaultdict(list)
+
+        # Find adjacent element in periodic direction
+        zeleid = defaultdict(list)
         for key in mesh_wall:
             part = key.split('_')[-1]
-            #mesh = self.mesh[key]
-
-            # Load internal connectivities
-            #con = self.mesh[f'con_{part}'].T
-            #con = con[['f0', 'f1']].astype('U4,i4').tolist()
-
-            #for l, r in con:
-            #    print(l)
-            #    raise RuntimeError
 
             # A single point of each element is enough for sorting
-            tol = 1e-10
-            peid = np.array(mesh_wall[key])
-            mesh = self.mesh[key][0,peid]
+            """This tolerance should depend on mesh size"""
+            tol = 1e-3
+            eids = np.array(mesh_wall[key])
+            mesh = self.mesh[key][0,eids]
 
             for id, pt in enumerate(mesh_prio):
                 dists = np.linalg.norm(mesh[:,:2] - pt, axis=1)
-                eids = np.where(dists < tol)[0]
-                if len(eids) > 0:
-                    index[id].append((key,peid[eids]))
+                index = np.where(dists < tol)[0]
+                if len(index) > 0:
+                    zeleid[id].append((key, index))
 
-        return index
+        return zeleid, mesh_wall
 
-    def average(self):
-        index = self.reorder()
-        soln_avg = np.zeros([(self.order+1)**3,self.nvars,len(index),len(self.time)])
+    def spancheck(self, meshid, key):
+        mesh = self.mesh[key][:,meshid,:2]
+        return np.allclose(mesh[:,0],mesh[:,1])
 
+
+    def spanavg(self):
+        zeleid, mesh_wall = self.reorder()
+
+        ele_type = {'hex': 'quad'}
+        soln_pts = {'quad': 'gauss-legendre'}
+
+        # Mesh average
+        mesh = defaultdict()
+        for key in mesh_wall:
+            mesh[key] = self.mesh[key][:,mesh_wall[key]]
+            shape = int((self.mesh[key].shape[0])**(1/3))
+        mesh_avg = np.zeros([shape**2,self.ndims,len(zeleid)])
+
+        for id, item in zeleid.items():
+            for idx, (key, eid) in enumerate(item):
+                if idx == 0:
+                    length = len(eid)
+                    msh = np.sum(mesh[key][:,eid], axis = 1)
+                else:
+                    length += len(eid)
+                    msh += np.sum(mesh[key][:,eid], axis = 1)
+
+            # Note here, reordering bases on the fact
+            msh = msh.reshape(shape**2,shape,self.ndims, order = 'F')
+            mesh_avg[:,:,id] = np.mean(msh, axis = 1) / length
+
+        # use strict soln pts set if not exit
+        etype = ele_type[key.split('_')[1]]
+        try:
+            self.cfg.get(f'solver-elements-{etype}', 'soln-pts')
+        except:
+            self.cfg.set(f'solver-elements-{etype}', 'soln-pts', soln_pts[etype])
+
+        # Get operator
+        mesh_op = self._get_mesh_op(etype, mesh_avg.shape[0])
+        mesh_avg = np.einsum('ij,jkl -> ikl', mesh_op, mesh_avg)
+
+        # Flash ro disk
+        self._flash_to_disk(self.dir, mesh_avg)
+        del mesh, mesh_avg, msh, mesh_op
+
+        soln_avg = np.zeros([(self.order+1)**2,self.nvars,len(zeleid),len(self.time)])
+        # Solution average
         for t in range(len(self.time)):
             print(t)
             soln = f'{self.solndir}_{self.time[t]}.pyfrs'
-            soln = self.load_snapshot(soln)
+            soln = self.load_snapshot(soln, mesh_wall)
 
-            for id, item in index.items():
+            for id, item in zeleid.items():
                 for idx, (key, eid) in enumerate(item):
-                    _, etype, part = key.split('_')
-                    name = f'{self.dataprefix}_{etype}_{part}'
                     if idx == 0:
                         length = len(eid)
-                        sln = np.sum(soln[name][...,eid], axis = -1)
+                        sln = np.sum(soln[key][...,eid], axis = -1)
                     else:
                         length += len(eid)
-                        sln += np.sum(soln[name][...,eid], axis = -1)
+                        sln += np.sum(soln[key][...,eid], axis = -1)
 
-                #sln = sln.reshape((self.order+1)**2,self.nvars,len(index))
-                soln_avg[:,:,id,t] = sln / length
+                # Note here, reordering bases on the fact
+                sln = sln.reshape((self.order+1)**2,(self.order+1),self.nvars, order = 'F')
+                soln_avg[:,:,id,t] = np.mean(sln, axis = 1) / length
 
-        print(soln_avg.shape)
+        # use strict soln pts set if not exit
+        etype = ele_type[key.split('_')[1]]
+        if self.cfg.get(f'solver-elements-{etype}', 'soln-pts', None) == None:
+            self.cfg.set(f'solver-elements-{etype}', 'soln-pts', soln_pts[etype])
 
-    def load_snapshot(self, name):
+        # Get operator
+        soln_op = self._get_soln_op(ele_type[key.split('_')[1]], soln_avg.shape[0])
+        soln_avg = np.einsum('ij,jklm -> iklm', soln_op, soln_avg)
+
+        # Flash ro disk
+        self._flash_to_disk(self.dir, soln_avg)
+
+
+    def spanfft(self):
+        raise NotImplementedError('This function is under development')
+
+
+    def load_snapshot(self, name, region):
         soln = defaultdict()
         f = h5py.File(name, 'r')
-        for i in f:
-            kk = i.split('_')
-            if 'hex' in kk:
-                soln[i] = np.array(f[i])
-
+        for k in region:
+            _, etype, part = k.split('_')
+            kk = f'{self.dataprefix}_{etype}_{part}'
+            soln[k] = np.array(f[kk])[...,region[k]]
         f.close()
-
         return soln
+
+    def _flash_to_disk(self, dir, array):
+        if array.shape[1] == self.ndims:
+            f = h5py.File(f'{dir}/spanavg.m', 'w')
+            f['mesh'] = array
+            f.close()
+        else:
+            f = h5py.File(f'{dir}/spanavg.s', 'w')
+            f['solution'] = array
+            f['info'] = np.array([self.tst, self.ted, self.dt])
+            f.close()
 
 
 

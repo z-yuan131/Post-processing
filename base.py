@@ -19,6 +19,12 @@ class Base(object):
         # Define mesh name and solution name
         self.name = name = [avg['mesh'],f"{avg['soln']}_{self.time[0]}.pyfrs"]
 
+        # Output directory
+        try:
+            self.dir = avg['odir']
+        except KeyError:
+            self.dir = '.'
+
         # solution dirctory
         self.solndir = avg['soln']
 
@@ -61,14 +67,22 @@ class Base(object):
         self._viscorr = self.cfg.get('solver', 'viscosity-correction', 'none')
 
     def get_time_series(self, time):
-
+        self.tst = time[0]
+        self.ted = time[1]
+        self.dt = time[2]
         tt = np.arange(time[0], time[1], time[2])
         self.time = list()
         for i in range(len(tt)):
             self.time.append("{:.1f}".format(tt[i]))
 
     # Operators
-    def _get_ops(self, nspts, etype, upts, nupts, order):
+    def _get_mesh_op(self, etype, nspts):
+        svpts = self._get_std_ele(etype, nspts, self.order)
+        mesh_op = self._get_mesh_op_vis(etype, nspts, svpts)
+        return mesh_op
+
+
+    def _get_ops_interp(self, nspts, etype, upts, nupts, order):
 
         svpts = self._get_std_ele(etype, nspts, order)
         mesh_op = self._get_mesh_op_vis(etype, nspts, svpts)
@@ -102,3 +116,7 @@ class Base(object):
 
     def _get_order(self, name, nspts):
         return self._get_shape(name, nspts, self.cfg).order_from_nspts(nspts)
+
+    def _get_soln_op(self, name, nspts):
+        shape = self._get_shape(name, nspts, self.cfg)
+        return shape.sbasis.nodal_basis_at(shape.upts).astype(self.dtype)
