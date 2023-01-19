@@ -13,7 +13,7 @@ import matplotlib.pyplot as plt
 class Region(Base):
     def __init__(self, argv):
         super().__init__(argv)
-        self.layers = 10
+        self.layers = 30
         self.suffix = ['hex']
         self.AOA = -3
         self.boundary_name = ['wall']
@@ -354,7 +354,7 @@ class Probes(Base):
                 nspts = self.mesh[key].shape[0]
                 upts = get_quadrule(etype, qrule_map[etype], nupts).pts
 
-                mesh_op = self._get_ops(nspts, etype, upts, nupts, self.order)
+                mesh_op = self._get_ops_interp(nspts, etype, upts, nupts, self.order)
                 mesh_op_vis = self._get_vis_op(nspts, etype, self.order)
 
                 self.mesh_bg.append(np.einsum('ij, jkl -> ikl',mesh_op,self.mesh[key]))
@@ -366,10 +366,11 @@ class Probes(Base):
     def mainproc(self, pts):
         print('-----------------------------\n')
 
-        # Preparation for parallel this code
-        #comm = MPI.COMM_WORLD
-        #rank = comm.Get_rank()
-        #size = comm.Get_size()
+        # Parallel sorting the whole time series
+        from mpi4py import MPI
+        comm = MPI.COMM_WORLD
+        rank = comm.Get_rank()
+        size = comm.Get_size()
 
         self.pre_process()
 
@@ -387,6 +388,7 @@ class Probes(Base):
             for i, (dist, etype, (uidx, eidx)) in enumerate(closest):
                 elepts[etype].append((i, eidx, self.mesh_trans[etype][uidx]))
 
+            raise NotImplementedError('refinement needs some process before output')
             # Refine
             outpts.append(self._refine_pts(elepts, pts).reshape(nupts,
                                             neles, self.nvars).swapaxes(1,2))
@@ -395,12 +397,15 @@ class Probes(Base):
             for i, (dist, etype, (uidx, eidx)) in enumerate(closest):
                 elepts[etype].append((i, eidx, uidx, etype))
 
-            # Get time series
-            self.sort_time_series(elepts)
+        # Get time series
+        soln_pts = self.sort_time_series(elepts, rank, size)
 
-        #self._flash_to_disk(outpts)
+        soln_pts = comm.gather(soln_pts, root=0)
 
-    def sort_time_series(self, elepts):
+        if rank == 0:
+            self._flash_to_disk(soln_pts)
+
+    def sort_time_series(self, elepts, rank, size):
         lookupid = defaultdict(list)
         Npts = 0
         for epts, lookup in zip(elepts,self.lookup):
@@ -412,21 +417,37 @@ class Probes(Base):
             lookupid[f'{lookup[0]}_{lookup[1]}'].append(eidx)
             Npts += len(eidx)
 
-        # Get information from solution field
-        soln_pts = np.zeros([Npts,self.nvars,len(self.time)])
+        # Get each rank a period of time
+        Ntime = len(self.time)//size
+        for i in range(size):
+            if i == rank:
+                if i+1 == size:
+                    time = self.time[i*Ntime:]
+                else:
+                    time = self.time[i*Ntime:(i+1)*Ntime]
 
-        for t in range(len(self.time)):
-            print(t)
-            soln = f'{self.solndir}_{self.time[t]}.pyfrs'
+        # Get information from solution field
+        soln_pts = np.zeros([Npts,self.nvars,len(time)])
+
+        for t in range(len(time)):
+            #print(t)
+            soln = f'{self.solndir}_{time[t]}.pyfrs'
             soln = self.load_snapshot(soln)
+            sln = []
             for kdx, idx in lookupid.items():
                 name = f'{self.dataprefix}_{kdx}'
 
-                """An error here: think about pts in the different partitions"""
-                soln_pts[...,t] = soln[name][idx[0],:,idx[1]]
+                #print(idx)
+                if len(sln) > 0:
+                    sln =  np.append(sln, soln[name][idx[0],:,idx[1]].reshape(-1,self.nvars), axis = 0)
+                else:
+                    sln = soln[name][idx[0],:,idx[1]].reshape(-1,self.nvars)
 
+            soln_pts[...,t] = sln
+        #print(soln_pts.shape)
 
-        print(soln_pts.shape)
+        return soln_pts
+
 
     def load_snapshot(self, name):
         soln = defaultdict()
@@ -557,6 +578,17 @@ class Probes(Base):
         return ktlocs, kplocs
 
     def _flash_to_disk(self, outpts):
+        f = h5py.File('soln_pts.s','w')
+        for pts in range(len(outpts)):
+            print(pts)
+            f[f'soln_{pts}'] = outpts[pts]
+        f.close()
+
+
+
+
+    """
+    def _flash_to_disk(self, outpts):
         # Prepare data for output
         self.cfg.set('solver','order',self.nwmsh_ord)
 
@@ -571,3 +603,4 @@ class Probes(Base):
             name = f'{self.dataprefix}_{etype}_{part}'
             f[name] = outpts[id]
         f.close()
+    """

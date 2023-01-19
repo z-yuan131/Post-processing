@@ -17,11 +17,17 @@ def config_file():
     arg['mesh'] = '/scratch/zhenyang/compute/pyfr/Naca0012trip/cylinder_trip/new_geo/run/mesh.pyfrm'
     arg['soln'] = '/scratch/zhenyang/compute/pyfr/Naca0012trip/cylinder_trip/new_geo/run/naca0012'
 
+    arg['mesh'] = '/scratch/zhenyang/compute/pyfr/Naca0012trip/Re2e5/run/mesh.pyfrm'
+    arg['soln'] = '/scratch/zhenyang/compute/pyfr/Naca0012trip/Re2e5/run/naca0012'
+
+
+
     # Output directory
     arg['odir'] = '/scratch/zhenyang/compute/pyfr/Naca0012trip/cylinder_trip/new_geo/run'
 
     # Time series (if single snapshot, keep start time equals end time)
-    arg['series_time'] = [10005, 10025.1, 5]   # [t_start, t_end, dt]
+    arg['series_time'] = [10005, 10025, 5]   # [t_start, t_end, dt]
+    arg['series_time'] = [15000, 15007.5, 2.5]   # [t_start, t_end, dt]
 
     # Functions
     #func['region'] = True
@@ -35,9 +41,9 @@ def main():
 
 
     #Region(arg).get_wall_O_grid()
-    SpanAverage(arg).spanavg()
-    #import numpy as np
-    #Probes(arg).mainproc(np.array([[100,100,-6],[200,200,-6]]))
+    #SpanAverage(arg).spanavg()
+    import numpy as np
+    Probes(arg).mainproc(np.array([[100,100,-9],[100,20,-6]]))
 
     #Spectra().process_data()
 

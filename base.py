@@ -70,10 +70,13 @@ class Base(object):
         self.tst = time[0]
         self.ted = time[1]
         self.dt = time[2]
-        tt = np.arange(time[0], time[1], time[2])
+        #tt = np.arange(time[0], time[1], time[2])
+
+        Ndt = int((time[1] - time[0])/time[2] + 1)
+        tt = np.linspace(time[0], time[1], Ndt, endpoint=True)
         self.time = list()
         for i in range(len(tt)):
-            self.time.append("{:.1f}".format(tt[i]))
+            self.time.append("{:.2f}".format(tt[i]))
 
     # Operators
     def _get_mesh_op(self, etype, nspts):
