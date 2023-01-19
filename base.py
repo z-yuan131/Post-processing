@@ -57,6 +57,9 @@ class Base(object):
         self.ndims = next(iter(self.mesh_inf.values()))[1][2]
         self.nvars = next(iter(self.soln_inf.values()))[1][1]
 
+        # Mesh order
+        self.meshord = self._get_mesh_order()
+
         # Ops
         #self.get_ops()
 
@@ -123,3 +126,9 @@ class Base(object):
     def _get_soln_op(self, name, nspts):
         shape = self._get_shape(name, nspts, self.cfg)
         return shape.sbasis.nodal_basis_at(shape.upts).astype(self.dtype)
+
+    def _get_mesh_order(self):
+        for key in self.mesh_inf:
+            etype = key.split('_')[1]
+            npts = self.mesh[key].shape[0]
+            return self._get_order(etype, npts) - 1
