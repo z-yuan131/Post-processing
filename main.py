@@ -41,11 +41,11 @@ def main():
 
 
     #Region(arg).get_wall_O_grid()
-    SpanAverage(arg).spanavg()
+    #SpanAverage(arg).spanavg()
     #import numpy as np
     #Probes(arg).mainproc(np.array([[100,100,-9],[100,20,-6]]))
 
-    #Spectra().process_data()
+    Spectra().process_data_cylinder2()
 
 
 if __name__ == "__main__":

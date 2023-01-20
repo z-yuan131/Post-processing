@@ -229,6 +229,18 @@ class SpanAverage(Region):
         mesh = self.mesh[key][:,meshid,:2]
         return np.allclose(mesh[:,0],mesh[:,1])
 
+    def mesh_sort(self, mesh):
+        # Raise to solution order if not:
+        #mesh_op = self._get_mesh_op(etype, mesh.shape[0])
+        #mesh = np.einsum('ij,jkl -> ikl', mesh_op, mesh)
+
+        # Get the periodic surface and reorder
+        n = self.meshord + 1
+        _idmap = [0, n**2, 20, 24]
+        print(np.where(np.linalg.norm(mesh[_idmap,:,:2] - mesh[0,0,:2], axis = -1) > 10e-5)[1])
+        raise RuntimeError
+
+
 
     def spanavg(self):
         zeleid, mesh_wall = self.reorder()
@@ -245,19 +257,21 @@ class SpanAverage(Region):
         mesh_avg = np.zeros([npts**2,self.ndims,len(zeleid)])
 
         for id, item in zeleid.items():
+            plt.figure()
             for idx, (key, eid) in enumerate(item):
                 if idx == 0:
                     length = len(eid)
-                    msh = np.sum(mesh[key][:,eid], axis = 1)
+                    #msh = np.sum(mesh[key][:,eid], axis = 1)
+                    msh = mesh[key][:,eid]
                 else:
                     length += len(eid)
-                    msh += np.sum(mesh[key][:,eid], axis = 1)
-                plt.figure()
-                plt.plot(mesh[key][:,eid,0],mesh[key][:,eid,1],'.')
-                plt.figure()
-                plt.plot(mesh[key][:,eid,0],mesh[key][:,eid,-1],'.')
-                plt.show()
-                raise RuntimeError
+                    #msh += np.sum(mesh[key][:,eid], axis = 1)
+                    msh = np.append(msh, mesh[key][:,eid], axis = 1)
+                plt.plot(mesh[key][0,eid,0],mesh[key][0,eid,-1],'.')
+
+            self.mesh_sort(msh)
+            plt.show()
+            raise RuntimeError
 
             # Note here, reordering bases on the fact
             msh = msh.reshape(npts**2,npts,self.ndims, order = 'F')
