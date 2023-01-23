@@ -39,13 +39,16 @@ def main():
 
     arg = config_file()
 
+    # Parallel sorting the whole time series
+    from mpi4py import MPI
+    comm = MPI.COMM_WORLD
 
     #Region(arg).get_wall_O_grid()
-    #SpanAverage(arg).spanavg()
+    SpanAverage(arg).spanavg(comm)
     #import numpy as np
     #Probes(arg).mainproc(np.array([[100,100,-9],[100,20,-6]]))
 
-    Spectra().process_data_cylinder2()
+    #Spectra().process_data_cylinder2()
 
 
 if __name__ == "__main__":

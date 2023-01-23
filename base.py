@@ -81,6 +81,18 @@ class Base(object):
         for i in range(len(tt)):
             self.time.append("{:.2f}".format(tt[i]))
 
+    def get_time_series_mpi(self, rank, size):
+        # Get each rank a period of time
+        Ntime = len(self.time)//size + 1
+        for i in range(size):
+            if i == rank:
+                if i+1 == size:
+                    time = self.time[i*Ntime:]
+                else:
+                    time = self.time[i*Ntime:(i+1)*Ntime]
+        return time
+
+
     # Operators
     def _get_mesh_op(self, etype, nspts):
         svpts = self._get_std_ele(etype, nspts, self.order)

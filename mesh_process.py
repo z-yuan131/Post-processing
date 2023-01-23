@@ -13,7 +13,7 @@ import matplotlib.pyplot as plt
 class Region(Base):
     def __init__(self, argv):
         super().__init__(argv)
-        self.layers = 3
+        self.layers = 25
         self.suffix = ['hex']
         self.AOA = -3
         self.boundary_name = ['wall']
@@ -25,7 +25,7 @@ class Region(Base):
 
         self.suffix_parts = np.where(np.array(mesh_part['hex']) > 0)[0]
         self.suffix_parts = [f'p{i}' for i in self.suffix_parts]
-        print(self.suffix_parts)
+        #print(self.suffix_parts)
 
     def get_boundary(self):
         mesh_wall = defaultdict(list)
@@ -53,8 +53,6 @@ class Region(Base):
                                 mesh_wall_tag.update({part: {(etype, eid): 0}})
                                 con_new[f'bcon_{bname}_{part}'].append((etype, eid))
 
-
-        #print(np.sum([len(mesh_wall[i]) for i in mesh_wall]))
         return mesh_wall_tag, mesh_wall, con_new
 
 
@@ -82,12 +80,10 @@ class Region(Base):
             for key in keys:
                 _, etype, part = key.split('_')
 
-
                 # Exchange information about recent updates to our set
                 if len(pcon) > 0:
                     for p, (pc, pcr, sb) in pcon[part].items():
                         sb[:] = [mesh_wall_tag[part].get(c, -1) == i for c in pc]
-
 
                 # Growing out by considering inertial partition
                 for l, r in con[part]:
@@ -98,7 +94,6 @@ class Region(Base):
                         mesh_wall_tag[part].update({r: i + 1})
                         mesh_wall[f'spt_{r[0]}_{part}'].append(r[1])
                         con_new[f'{part}_{part}'].append((l,r))
-
 
                     elif mesh_wall_tag[part].get(r, -1) == i and l not in mesh_wall_tag[part]:
                         mesh_wall_tag[part].update({l: i + 1})
@@ -142,7 +137,6 @@ class Region(Base):
 
             except KeyError:
                 continue
-
             try:
                 pcon[part].update({p: (pc, pcr, *np.empty((1, len(pc)), dtype=bool))})
             except KeyError:
@@ -152,20 +146,19 @@ class Region(Base):
 
 
 
-
 class SpanAverage(Region):
 
     def __init__(self, argv):
         super().__init__(argv)
         self.tol = 1e-6
-
+        self._linmap = lambda n: {'hex': np.array([0, n-1, n**2-n, n**2-1, n**2*(n-1), (n-1)*(n**2+1), n**3-n, n**3-1])}
 
     def reorder(self):
         mesh_wall_tag, mesh_wall, con = self.get_wall_O_grid()
 
         # Corner points map for hex type of elements
         n = self.meshord + 1
-        _map = {'hex': [0, n-1, n*(n-1), n**2-1, n**2*(n-1), (n**2+1)*(n-1), n**3-n, n**3-1]}
+        _map = self._linmap(n)
 
         # Collect one periodic boundary
         eidp = defaultdict()
@@ -211,10 +204,10 @@ class SpanAverage(Region):
             _,etype,part = key.split('_')
 
             # corner points of each element is enough for sorting
-            """This tolerance should depend on mesh size"""
-            tol = 1e-5
             eids = np.array(mesh_wall[key])
             mesh = self.mesh[key][:,eids]
+            """This tolerance should depend on mesh size"""
+            tol = np.linalg.norm(mesh[n**2-1,0] - mesh[0,0], axis = 0)/50
             mesh = np.mean(mesh[_map[etype]], axis = 0)
 
             for id, pt in enumerate(mesh_prio):
@@ -229,76 +222,91 @@ class SpanAverage(Region):
         mesh = self.mesh[key][:,meshid,:2]
         return np.allclose(mesh[:,0],mesh[:,1])
 
-    def mesh_sort(self, mesh):
-        # Raise to solution order if not:
-        #mesh_op = self._get_mesh_op(etype, mesh.shape[0])
-        #mesh = np.einsum('ij,jkl -> ikl', mesh_op, mesh)
+    def spanavg(self, comm):
+        # Prepare for MPI process
+        rank = comm.Get_rank()
+        size = comm.Get_size()
 
-        # Get the periodic surface and reorder
-        n = self.meshord + 1
-        _idmap = [0, n**2, 20, 24]
-        print(np.where(np.linalg.norm(mesh[_idmap,:,:2] - mesh[0,0,:2], axis = -1) > 10e-5)[1])
+        if rank == 0:
+            zeleid, mesh_wall = self.reorder()
+        else:
+            zeleid = None
+            mesh_wall = None
+            idlist = None
+            index = None
+        # Wait until everything finished
+        comm.barrier()
+
+        # Boardcast pts and eles information
+        zeleid = comm.bcast(zeleid, root=0)
+        mesh_wall = comm.bcast(mesh_wall, root=0)
+
+        if rank == 0:
+            idlist, index = self.mesh_avg(zeleid, mesh_wall)
+
         raise RuntimeError
 
+        # Boardcast pts and eles information
+        idlist = comm.bcast(idlist, root=0)
+        index = comm.bcast(index, root=0)
 
+        time = self.get_time_series_mpi(rank, size)
+        soln_avg = self.soln_avg(zeleid, mesh_wall, idlist, index, time)
 
-    def spanavg(self):
-        zeleid, mesh_wall = self.reorder()
+        # Reduction
+        soln_avg = comm.gather(soln_avg, root=0)
+
+        # Flash ro disk
+        if rank == 0:
+            self._flash_to_disk(self.dir, soln_avg)
+
+    def mesh_avg(self, zeleid, mesh_wall):
 
         ele_type = {'hex': 'quad'}
         soln_pts = {'quad': 'gauss-legendre'}
 
         # Mesh average
         mesh = defaultdict()
+        idlist = defaultdict()
         for key in mesh_wall:
             print(key)
             mesh[key] = self.mesh[key][:,mesh_wall[key]]
-            npts = self.meshord+1
-        mesh_avg = np.zeros([npts**2,self.ndims,len(zeleid)])
+        n = self.meshord + 1
+        mesh_avg = np.zeros([n**2,self.ndims,len(zeleid)])
 
+        index = []
         for id, item in zeleid.items():
-            plt.figure()
             for idx, (key, eid) in enumerate(item):
                 if idx == 0:
-                    length = len(eid)
-                    #msh = np.sum(mesh[key][:,eid], axis = 1)
                     msh = mesh[key][:,eid]
                 else:
-                    length += len(eid)
-                    #msh += np.sum(mesh[key][:,eid], axis = 1)
                     msh = np.append(msh, mesh[key][:,eid], axis = 1)
-                plt.plot(mesh[key][0,eid,0],mesh[key][0,eid,-1],'.')
 
-            self.mesh_sort(msh)
-            plt.show()
-            raise RuntimeError
+            idx, index1 = self.mesh_sort(msh, index)
+            idlist[id] = idx
+        if len(index1) != 1:
+            raise RuntimeError('much more complicated case, not ready yet')
+        else:
+            index = self.highorderproc(index1[0], self.meshord)
 
-            # Note here, reordering bases on the fact
-            msh = msh.reshape(npts**2,npts,self.ndims, order = 'F')
-            print(msh.shape)
-            plt.figure()
-            plt.plot(msh[:,0,0],msh[:,0,1],'.')
-            plt.figure()
-            plt.plot(msh[:,0,0],msh[:,0,-1],'.')
-            plt.figure()
-            plt.plot(msh[:,0,1],msh[:,0,-1],'.')
-            plt.show()
-            raise RuntimeError
+        for id, item in zeleid.items():
+            for idx, (key, eid) in enumerate(item):
+                if idx == 0:
+                    msh = mesh[key][:,eid]
+                else:
+                    msh = np.append(msh, mesh[key][:,eid], axis = 1)
 
-            mesh_avg[:,:,id] = np.mean(msh, axis = 1) / length
+            if len(idlist[id]) > 0:
+                mt = msh[:,idlist[id]]
+                msh[:,idlist[id]] = mt[index]
 
+            # Average
+            msh = np.mean(msh, axis = 1)
+            # Note here, reshaping bases on the fact that
+            # the mesh is extruded in span
+            msh = msh.reshape(n**2,n,self.ndims, order = 'F')
 
-
-        id  = 100
-        plt.figure()
-        plt.plot(mesh_avg[:,0,id],mesh_avg[:,1,id],'.')
-        plt.figure()
-        plt.plot(mesh_avg[:,0,id],mesh_avg[:,-1,id],'.')
-        plt.figure()
-        plt.plot(mesh_avg[:,1,id],mesh_avg[:,-1,id],'.')
-        plt.show()
-        raise RuntimeError
-
+            mesh_avg[:,:,id] = np.mean(msh, axis = 1)
 
         # use strict soln pts set if not exit
         etype = ele_type[key.split('_')[1]]
@@ -312,45 +320,104 @@ class SpanAverage(Region):
         mesh_avg = np.einsum('ij,jkl -> ikl', mesh_op, mesh_avg)
 
         # Flash ro disk
-        self._flash_to_disk(self.dir, mesh_avg)
-        del mesh, mesh_avg, msh, mesh_op
+        self._flash_to_disk(self.dir, mesh_avg, True)
+        return idlist, index1
 
-        soln_avg = np.zeros([(self.order+1)**2,self.nvars,len(zeleid),len(self.time)])
+    def soln_avg(self, zeleid, mesh_wall, idlist, index, time):
+
+        ele_type = {'hex': 'quad'}
+        soln_pts = {'quad': 'gauss-legendre'}
+
+        n = self.order + 1
+        soln_avg = np.zeros([n**2,self.nvars,len(zeleid),len(time)])
+
+        if len(index) != 1:
+            raise RuntimeError('much more complicated case, not ready yet')
+        else:
+            index = self.highorderproc(index[0], self.order)
+
         # Solution average
-        for t in range(len(self.time)):
+        for t in range(len(time)):
             print(t)
-            soln = f'{self.solndir}_{self.time[t]}.pyfrs'
+            soln = f'{self.solndir}_{time[t]}.pyfrs'
             soln = self.load_snapshot(soln, mesh_wall)
 
             for id, item in zeleid.items():
                 for idx, (key, eid) in enumerate(item):
                     if idx == 0:
-                        length = len(eid)
-                        sln = np.sum(soln[key][...,eid], axis = -1)
+                        sln = soln[key][...,eid]
                     else:
-                        length += len(eid)
-                        sln += np.sum(soln[key][...,eid], axis = -1)
+                        sln = np.append(sln, soln[key][...,eid], axis = -1)
 
+                if len(idlist[id]) > 0:
+                    mt = sln[...,idlist[id]]
+                    sln[...,idlist[id]] = mt[index]
+
+                # Average
+                sln = np.mean(sln, axis = -1)
                 # Note here, reordering bases on the fact
-                sln = sln.reshape((self.order+1)**2,(self.order+1),self.nvars, order = 'F')
-                soln_avg[:,:,id,t] = np.mean(sln, axis = 1) / length
+                sln = sln.reshape(n**2,n,self.nvars, order = 'F')
+                soln_avg[:,:,id,t] = np.mean(sln, axis = 1)
 
         # use strict soln pts set if not exit
         etype = ele_type[key.split('_')[1]]
-        if self.cfg.get(f'solver-elements-{etype}', 'soln-pts', None) == None:
+        try:
+            self.cfg.get(f'solver-elements-{etype}', 'soln-pts')
+        except:
             self.cfg.set(f'solver-elements-{etype}', 'soln-pts', soln_pts[etype])
 
         # Get operator
         soln_op = self._get_soln_op(ele_type[key.split('_')[1]], soln_avg.shape[0])
         soln_avg = np.einsum('ij,jklm -> iklm', soln_op, soln_avg)
 
-        # Flash ro disk
-        self._flash_to_disk(self.dir, soln_avg)
+        return soln_avg
+
+    def highorderproc(self, index, order):
+        print('Just tabulate it until I found a way to write it efficiently')
+        n = order + 1
+        for i in range(n**2):
+            if i == 0:
+                oindex = np.arange(n**3-n,n**3,1)
+            else:
+                oindex = np.append(oindex, np.arange(n**3-n*(i+1),n**3-n*i,1))
+
+        return oindex
+
+    def mesh_sort(self, mesh, index):
+        npts, neles = mesh.shape[:2]
+        # Raise to solution order if not:
+        #mesh_op = self._get_mesh_op('hex', npts)
+        #mesh = np.einsum('ij,jkl -> ikl', mesh_op, mesh)
+        #npts = mesh.shape[0]
+
+        # reorder by z coordinate
+        loc = [np.linalg.norm(mesh[0,0,:2] - mesh[0,i,:2], axis = 0) < self.tol
+                                        for i in range(neles)]
+        if not all(loc):
+            idx = []
+            _map = self._linmap(self.meshord+1)['hex']
+            mesh = mesh[_map]
+            msh = mesh[:,0]
+            index = []
+            nid = -1
+            for id, k in enumerate(loc):
+                if not k:
+                    msh[:,-1] += np.min(mesh[:,id,-1]) - np.min(msh[:,-1])
+                    dlist = [np.linalg.norm(msh[j] - mesh[:,id], axis = 1)
+                                        < self.tol for j in range(len(_map))]
+                    dlist = [k for d in dlist for k, x in enumerate(d) if x]
+
+                    if dlist not in index:
+                        nid += 1
+                        index.append(dlist)
+
+                    idx.append(id)
+
+            return idx, index
 
 
     def spanfft(self):
         raise NotImplementedError('This function is under development')
-
 
     def load_snapshot(self, name, region):
         soln = defaultdict()
@@ -362,15 +429,17 @@ class SpanAverage(Region):
         f.close()
         return soln
 
-    def _flash_to_disk(self, dir, array):
-        if array.shape[1] == self.ndims:
+    def _flash_to_disk(self, dir, array, mesh = False):
+        if mesh == True:
             f = h5py.File(f'{dir}/spanavg.m', 'w')
             f['mesh'] = array
             f.close()
         else:
             f = h5py.File(f'{dir}/spanavg.s', 'w')
-            f['solution'] = array
-            f['info'] = np.array([self.tst, self.ted, self.dt])
+            for id in range(len(array)):
+                f[f'solution_{id}'] = array[id]
+                if  id == 0:
+                    f['info'] = np.array([self.tst, self.ted, self.dt])
             f.close()
 
 
@@ -417,12 +486,9 @@ class Probes(Base):
                 self.lookup.append((etype,part))
 
 
-    def mainproc(self, pts):
+    def mainproc(self, pts, comm):
         print('-----------------------------\n')
-
-        # Parallel sorting the whole time series
-        from mpi4py import MPI
-        comm = MPI.COMM_WORLD
+        # Prepare for MPI process
         rank = comm.Get_rank()
         size = comm.Get_size()
 
@@ -440,7 +506,8 @@ class Probes(Base):
         self.lookup = comm.bcast(self.lookup, root=0)
 
         # Get time series
-        soln_pts = self.sort_time_series(elepts, rank, size)
+        time = self.get_time_series_mpi(rank, size)
+        soln_pts = self.sort_time_series(elepts)
 
         soln_pts = comm.gather(soln_pts, root=0)
 
@@ -477,7 +544,7 @@ class Probes(Base):
         return elepts
 
 
-    def sort_time_series(self, elepts, rank, size):
+    def sort_time_series(self, elepts, time):
         lookupid = defaultdict(list)
         Npts = 0
         for epts, lookup in zip(elepts,self.lookup):
@@ -488,15 +555,6 @@ class Probes(Base):
             lookupid[f'{lookup[0]}_{lookup[1]}'].append(uidx)
             lookupid[f'{lookup[0]}_{lookup[1]}'].append(eidx)
             Npts += len(eidx)
-
-        # Get each rank a period of time
-        Ntime = len(self.time)//size + 1
-        for i in range(size):
-            if i == rank:
-                if i+1 == size:
-                    time = self.time[i*Ntime:]
-                else:
-                    time = self.time[i*Ntime:(i+1)*Ntime]
 
         # Get information from solution field
         soln_pts = np.zeros([Npts,self.nvars,len(time)])
@@ -516,7 +574,6 @@ class Probes(Base):
                     sln = soln[name][idx[0],:,idx[1]].reshape(-1,self.nvars)
 
             soln_pts[...,t] = sln
-        #print(soln_pts.shape)
 
         return soln_pts
 
