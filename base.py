@@ -17,7 +17,7 @@ class Base(object):
         self.get_time_series(avg['series_time'])
 
         # Define mesh name and solution name
-        self.name = name = [avg['mesh'],f"{avg['soln']}_{self.time[0]}.pyfrs"]
+        self.name = name = [avg['mesh'],f"{avg['soln']}{self.time[0]}.pyfrs"]
 
         # Output directory
         try:

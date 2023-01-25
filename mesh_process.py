@@ -11,12 +11,14 @@ import matplotlib.pyplot as plt
 #import matplotlib.tri as tri
 
 class Region(Base):
-    def __init__(self, argv):
+    def __init__(self, argv, icfg, fname):
         super().__init__(argv)
-        self.layers = 25
-        self.suffix = ['hex']
-        self.AOA = -3
-        self.boundary_name = ['wall']
+        self.layers = icfg.getint(fname, 'layers', 0)
+        self.suffix = ['hex'] #icfg.get(fname, 'etype')
+        self.boundary_name = ['wall']#icfg.get(fname, 'bname')
+
+        if self.boundary_name == None:
+            raise RuntimeError('Region has to be attached to a boundary.')
 
         if self.suffix == None:
             self.suffix = ['quad','tri','hex','tet','pri','pyr']
@@ -25,7 +27,6 @@ class Region(Base):
 
         self.suffix_parts = np.where(np.array(mesh_part['hex']) > 0)[0]
         self.suffix_parts = [f'p{i}' for i in self.suffix_parts]
-        #print(self.suffix_parts)
 
     def get_boundary(self):
         mesh_wall = defaultdict(list)
@@ -74,11 +75,14 @@ class Region(Base):
 
 
         # For wall normal quantities, load the connectivities
-        keys = list(mesh_wall.keys())
+        #keys = list(mesh_wall.keys())
         for i in range(self.layers):
 
-            for key in keys:
-                _, etype, part = key.split('_')
+            #for key in keys:
+            for part in self.suffix_parts:
+                #_, etype, part = key.split('_')
+                if part not in mesh_wall_tag:
+                    mesh_wall_tag[part] = {}
 
                 # Exchange information about recent updates to our set
                 if len(pcon) > 0:
@@ -148,9 +152,10 @@ class Region(Base):
 
 class SpanAverage(Region):
 
-    def __init__(self, argv):
-        super().__init__(argv)
-        self.tol = 1e-6
+    def __init__(self, argv, icfg, fname):
+        super().__init__(argv, icfg, fname)
+        self.mode = icfg.get(fname, 'mode', 'mesh')
+        self.tol = icfg.getfloat(fname, 'tol', 1e-6)
         self._linmap = lambda n: {'hex': np.array([0, n-1, n**2-n, n**2-1, n**2*(n-1), (n-1)*(n**2+1), n**3-n, n**3-1])}
 
     def reorder(self):
@@ -207,7 +212,7 @@ class SpanAverage(Region):
             eids = np.array(mesh_wall[key])
             mesh = self.mesh[key][:,eids]
             """This tolerance should depend on mesh size"""
-            tol = np.linalg.norm(mesh[n**2-1,0] - mesh[0,0], axis = 0)/50
+            tol = np.linalg.norm(mesh[n**2-1,0] - mesh[0,0], axis = 0)/100
             mesh = np.mean(mesh[_map[etype]], axis = 0)
 
             for id, pt in enumerate(mesh_prio):
@@ -228,7 +233,15 @@ class SpanAverage(Region):
         size = comm.Get_size()
 
         if rank == 0:
-            zeleid, mesh_wall = self.reorder()
+            if self.mode == 'mesh':
+                zeleid, mesh_wall = self.reorder()
+                self.mesh_avg(zeleid, mesh_wall)
+                #self.rfromc(self.odir, zeleid, mesh_wall)
+                return 0
+            #elif self.mode = 'soln':
+            #    zelelid, mesh_wall = self.rfromc(self.odir)
+            else:
+                zeleid, mesh_wall = self.reorder()
         else:
             zeleid = None
             mesh_wall = None
@@ -243,8 +256,6 @@ class SpanAverage(Region):
 
         if rank == 0:
             idlist, index = self.mesh_avg(zeleid, mesh_wall)
-
-        raise RuntimeError
 
         # Boardcast pts and eles information
         idlist = comm.bcast(idlist, root=0)
@@ -339,7 +350,7 @@ class SpanAverage(Region):
         # Solution average
         for t in range(len(time)):
             print(t)
-            soln = f'{self.solndir}_{time[t]}.pyfrs'
+            soln = f'{self.solndir}{time[t]}.pyfrs'
             soln = self.load_snapshot(soln, mesh_wall)
 
             for id, item in zeleid.items():
@@ -441,8 +452,6 @@ class SpanAverage(Region):
                 if  id == 0:
                     f['info'] = np.array([self.tst, self.ted, self.dt])
             f.close()
-
-
 
 
 class Probes(Base):
@@ -561,7 +570,7 @@ class Probes(Base):
 
         for t in range(len(time)):
             print(t)
-            soln = f'{self.solndir}_{time[t]}.pyfrs'
+            soln = f'{self.solndir}{time[t]}.pyfrs'
             soln = self.load_snapshot(soln)
             sln = []
             for kdx, idx in lookupid.items():
