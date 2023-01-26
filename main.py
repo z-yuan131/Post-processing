@@ -3,8 +3,10 @@ import sys
 from argparse import ArgumentParser, FileType
 from collections import defaultdict
 
-from mesh_process import Region, SpanAverage, Probes
+#from mesh_process import Region, SpanAverage, Probes
 #from functions.spectra import Spectra
+from preproc.region import Region
+
 
 from pyfr.inifile import Inifile
 
@@ -39,10 +41,11 @@ def main():
     arg, cfg = config_file()
 
 
-    #Region(arg).get_wall_O_grid()
-    if 'func-spanavg' in cfg.sections():
-        fname = 'func-spanavg'
-        SpanAverage(arg, cfg, fname).spanavg()
+    fname = 'func-spanavg'
+    Region(arg, cfg, fname).get_wall_O_grid()
+    #if 'func-spanavg' in cfg.sections():
+    #    fname = 'func-spanavg'
+    #    SpanAverage(arg, cfg, fname).spanavg()
     #import numpy as np
     #Probes(arg).mainproc(np.array([[100,100,-9],[100,20,-6]]))
 
