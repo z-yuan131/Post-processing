@@ -83,7 +83,10 @@ class Base(object):
 
     def get_time_series_mpi(self, rank, size):
         # Get each rank a period of time
-        Ntime = len(self.time)//size + 1
+        if len(self.time)//size != len(self.time)/size:
+            Ntime = len(self.time)//size + 1
+        else:
+            Ntime = len(self.time)//size
         for i in range(size):
             if i == rank:
                 if i+1 == size:

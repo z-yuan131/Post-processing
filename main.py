@@ -38,14 +38,11 @@ def main():
 
     arg, cfg = config_file()
 
-    # Parallel sorting the whole time series
-    from mpi4py import MPI
-    comm = MPI.COMM_WORLD
 
     #Region(arg).get_wall_O_grid()
     if 'func-spanavg' in cfg.sections():
         fname = 'func-spanavg'
-        SpanAverage(arg, cfg, fname).spanavg(comm)
+        SpanAverage(arg, cfg, fname).spanavg()
     #import numpy as np
     #Probes(arg).mainproc(np.array([[100,100,-9],[100,20,-6]]))
 
