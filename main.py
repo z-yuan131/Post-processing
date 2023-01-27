@@ -5,7 +5,8 @@ from collections import defaultdict
 
 #from mesh_process import Region, SpanAverage, Probes
 #from functions.spectra import Spectra
-from preproc.region import Region
+from feature.region import Region
+from feature.spanproc import SpanBase
 
 
 from pyfr.inifile import Inifile
@@ -42,7 +43,8 @@ def main():
 
 
     fname = 'func-spanavg'
-    Region(arg, cfg, fname).get_wall_O_grid()
+    #Region(arg, cfg, fname).get_wall_O_grid()
+    SpanBase(arg, cfg, fname).spanfft()
     #if 'func-spanavg' in cfg.sections():
     #    fname = 'func-spanavg'
     #    SpanAverage(arg, cfg, fname).spanavg()

@@ -137,12 +137,17 @@ class Region(Base):
         return mesh_wall_tag, mesh_wall
 
     def write_to_disk(self, mesh_wall):
+        f = h5py.File(f'{self.dir}/region.m','w')
+        for key in mesh_wall:
+            f[key] = mesh_wall[key]
+        f.close()
+
+        """
         plt.figure()
         for key in mesh_wall:
             mesh = self.mesh[key][0,mesh_wall[key]]
             plt.plot(mesh[:,0],mesh[:,1],'.')
         plt.show()
-
 
 
 
@@ -158,6 +163,7 @@ class Region(Base):
         for k in soln:
             f[k] = soln[k]
         f.close()
+        """
 
     def load_connectivity(self, part):
 
