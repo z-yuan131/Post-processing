@@ -7,7 +7,7 @@ import h5py
 from pyfr.readers.native import NativeReader
 from pyfr.quadrules import get_quadrule
 
-import matplotlib.pyplot as plt
+#import matplotlib.pyplot as plt
 #import matplotlib.tri as tri
 
 """
@@ -24,7 +24,7 @@ Otherwise it could be a problem in loading snapshot if mpi failed.
 third, mpi process for loading and process all snapshots. The key point here is
 to evenly distribute all snapshots that needs to output.
 
-After all of these, the total memory requirement shoudl be much much smaller
+After all of these, the total memory requirement should be much much smaller
 and could be able to process locally for plotting etc.
 
 
@@ -36,9 +36,13 @@ class SpanBase(Region):
         super().__init__(argv, icfg, fname)
         self.mode = icfg.get(fname, 'mode', 'mesh')
         self.tol = icfg.getfloat(fname, 'tol', 1e-6)
-        self.outfreq = icfg.getfloat(fname, 'outfreq', 1)
+        self.outfreq = icfg.getint(fname, 'outfreq', 1)
+        nfft = icfg.getint(fname, 'nfft', 10)
         self._linmap = lambda n: {'hex': np.array([0, n-1, n**2-n, n**2-1,
                                 n**2*(n-1), (n-1)*(n**2+1), n**3-n, n**3-1])}
+
+        # Get indices of results we need
+        self.nfft = np.append(np.arange(0,nfft),np.arange(-nfft+1,0))
 
     def _get_eles(self):
         f = h5py.File(f'{self.dir}/region.m','r')
@@ -74,7 +78,7 @@ class SpanBase(Region):
                         con_new.append()
         """
 
-        #npeid = np.sum([len(index[id]) for id in range(len(mesh)) if len(index[id]) > 0])
+        npeid = np.sum([len(index[id]) for id in range(len(mesh)) if len(index[id]) > 0])
 
         # Find adjacent elements in the periodic direction
         zeleid = defaultdict(list)
@@ -86,11 +90,11 @@ class SpanBase(Region):
                     dists = [np.linalg.norm(msh[:,:2] - pt[:2], axis=1)
                                                                 for pt in pts]
                     for peidx,dist in enumerate(dists):
-                        iidx = list(np.where(dist < self.tol)[0])
+                        iidx = np.where(dist < self.tol)[0]
                         if len(iidx) > 0:
                             zeleid[n+peidx].append((idm, iidx))
 
-            n += len(eids)
+                n += len(eids)
 
         return zeleid, mesh_wall, lookup
 
@@ -101,10 +105,146 @@ class SpanBase(Region):
         rank = comm.Get_rank()
         size = comm.Get_size()
 
-        if rank == 0:
-            zeleid, mesh_wall, lookup = self._ele_reorder()
+        if self.mode == 'mesh':
+            if rank == 0:
+                zeleid, mesh_wall, lookup = self._ele_reorder()
+                self.mesh_avg(zeleid, mesh_wall, lookup)
+            return 0
+        else:
+            if rank == 0:
+                zeleid, idlist, index, sortid, mesh_wall, lookup = self.loadcahcedfile()
+            else:
+                zeleid, idlist, index, sortid, mesh_wall, lookup = [None]*6
 
-        self.mesh_avg(zeleid, mesh_wall, lookup)
+            # Boardcast pts and eles information
+            zeleid = comm.bcast(zeleid, root=0)
+            idlist = comm.bcast(idlist, root=0)
+            index = comm.bcast(index, root=0)
+            sortid = comm.bcast(sortid, root=0)
+            mesh_wall = comm.bcast(mesh_wall, root=0)
+            lookup = comm.bcast(lookup, root=0)
+
+            # Get time series for each rank
+            time = self.get_time_series_mpi(rank, size)
+
+            if len(time) > 0:
+                for id, item in index.items():
+                    index[id] = [self.highorderproc(idx, self.order)
+                                                            for idx in item]
+                for t in time:
+                    self.soln_fft(zeleid, mesh_wall, idlist, index,
+                                                        sortid, t, lookup)
+
+    def soln_fft(self, zeleid, mesh_wall, idlist, index, sortid, time, lookup):
+        ele_type = {'hex': 'quad'}
+        soln_pts = {'quad': 'gauss-legendre'}
+
+        # Solution average
+        soln = f'{self.solndir}{time}.pyfrs'
+        #soln = f'/Users/yuanzhenyang/compute/pyfr/Naca0012trip/Re200k/run/mesh.pyfrm'
+        soln = self._load_snapshot(soln, mesh_wall, lookup)
+
+        # Get operator
+        #n = self.meshord + 1
+        #mesh_op = self._get_mesh_op('hex', n**3)
+
+        #for id, sln in enumerate(soln):
+        #    soln[id] = np.einsum('ij,jkl -> ikl', mesh_op, sln)
+
+
+
+        n = self.order + 1
+        soln_fft = np.zeros([n**2,len(self.nfft),self.nvars,len(zeleid)],
+                                                        dtype = np.complex_)
+
+        #n = self.order + 1
+        #soln_fft = np.zeros([n**2,self.nfft,self.ndims,len(zeleid)])
+
+        for id, item in zeleid.items():
+            for idx, (key, eid) in enumerate(item):
+                if idx == 0:
+                    sln = soln[key][:,eid]
+                else:
+                    sln = np.append(sln, soln[key][:,eid], axis = 1)
+
+            if id in idlist:
+                idx = index[id]
+                for k, v in enumerate(idlist[id]):
+                    mt = sln[:,v]
+                    sln[:,v] = mt[idx[k]]
+
+            # Elimate common surface boundary
+            sln = self.comfb_fft(sln, n, sortid[id])
+            soln_fft[...,id] = sln
+
+        self._flash_to_disk(soln_fft, time)
+
+    def _flash_to_disk(self, array, t):
+        """Possibly there're much efficient ways to save complex numbers."""
+        f = h5py.File(f'{self.dir}/spanavg_fft_{t}.s', 'w')
+        #f.create_dataset('soln', array, dtype='complex')
+        f['soln_real'] = array.real
+        f['soln_imag'] = array.imag
+        f.close()
+
+
+
+    def comfb_fft(self, sln, npts, sortid):
+        neles, nvars = sln.shape[1:]
+        soln = np.zeros([npts**2, neles * (npts - 1) + 1, nvars])
+        sln = sln.reshape(npts**2, -1, nvars, order= 'F')
+        sln = sln[:,sortid]
+
+        j = 0
+        for i in range(sln.shape[1]):
+            if i != 0 and i % npts == 0:
+                soln[:,j] = (sln[:,i] + sln[:,i-1])/2
+                j += 1
+            elif i % npts == npts - 1:
+                continue
+            else:
+                soln[:,j] = sln[:,i]
+                j += 1
+
+        return np.fft.fft(soln, axis = 1)[:,self.nfft]
+
+
+    def loadcahcedfile(self):
+        f = h5py.File(f'{self.dir}/spanavg.m','r')
+        zeleid = defaultdict(list)
+        idlist = defaultdict(list)
+        index = defaultdict(list)
+        mesh_wall = {}
+        lookup = {}
+        sortid = []
+        for i in f:
+            if i == 'mesh':
+                mesh = np.array(f[i])
+            if i == 'zeleid':
+                for id  in np.array(f[i]):
+                    for kid in np.array(f[f'{i}/{id}']):
+                        zeleid[int(id)].append((int(kid), np.array(f[f'{i}/{id}/{kid}'])))
+            if i == 'sortid':
+                for id  in np.array(f[i]):
+                    sortid.append(np.array(f[f'{i}/{id}']))
+            if i == 'idlist':
+                for id  in np.array(f[i]):
+                    for kid in np.array(f[f'{i}/{id}']):
+                        idlist[int(id)].append(list(f[f'{i}/{id}/{kid}']))
+            if i == 'index':
+                for id  in np.array(f[i]):
+                    for kid in np.array(f[f'{i}/{id}']):
+                        index[int(id)].append(list(f[f'{i}/{id}/{kid}']))
+            if i == 'mesh_wall':
+                for key in np.array(f[i]):
+                    mesh_wall[key] = np.array(f[f'{i}/{key}'])
+            if i == 'lookup':
+                for id in np.array(f[i]):
+                    idx = int(np.array(f[f'{i}/{id}']))
+                    lookup[idx] = id
+        f.close()
+
+        return zeleid, idlist, index, sortid, mesh_wall, lookup
 
 
     def mesh_avg(self, zeleid, mesh_wall, lookup):
@@ -112,12 +252,21 @@ class SpanBase(Region):
         soln_pts = {'quad': 'gauss-legendre'}
 
         mesh = []
-        idlist = []
+        idlist = {}
+        index = {}
+        indexx = {}
         sortid = []
-        for key in lookup:
-            mesh.append(self.mesh[key][:,mesh_wall[key]])
 
+        # Get operator
         n = self.meshord + 1
+        mesh_op = self._get_mesh_op('hex', n**3)
+
+        for key in lookup:
+            msh = self.mesh[key][:,mesh_wall[key]]
+            msh = np.einsum('ij,jkl -> ikl', mesh_op, msh)
+            mesh.append(msh)
+
+        n = self.order + 1
         mesh_avg = np.zeros([n**2,self.ndims,len(zeleid)])
 
         for id, item in zeleid.items():
@@ -126,13 +275,15 @@ class SpanBase(Region):
                     msh = mesh[kid][:,eids]
                 else:
                     msh = np.append(msh, mesh[kid][:,eids], axis = 1)
+            if msh.shape[1] < 100:
+                print(msh.shape)
+            idxx, index1 = self.mesh_sort(msh)
+            if len(idxx) > 0:
+                idlist[id] = idxx
+                index[id] = index1
 
-            idx, index1 = self.mesh_sort(msh)
-            idlist.append(idx)
-        if len(index1) != 1:
-            raise RuntimeError('much more complicated case, not ready yet')
-        else:
-            index = self.highorderproc(index1[0], self.meshord)
+        for id, item in index.items():
+            indexx[id] = [self.highorderproc(idx, self.order) for idx in item]
 
         for id, item in zeleid.items():
             for idx, (key, eid) in enumerate(item):
@@ -141,9 +292,11 @@ class SpanBase(Region):
                 else:
                     msh = np.append(msh, mesh[key][:,eid], axis = 1)
 
-            if len(idlist[id]) > 0:
-                mt = msh[:,idlist[id]]
-                msh[:,idlist[id]] = mt[index]
+            if id in idlist:
+                idx = indexx[id]
+                for k, v in enumerate(idlist[id]):
+                    mt = msh[:,v]
+                    msh[:,v] = mt[idx[k]]
 
             msh = msh.reshape(n**2,-1,self.ndims, order = 'F')
             sortid.append(np.argsort(np.mean(msh[:,:,-1],axis = 0)))
@@ -151,6 +304,7 @@ class SpanBase(Region):
             # Average
             mesh_avg[:,:,id] = np.mean(msh, axis = 1)
 
+        """
         # use strict soln pts set if not exit
         etype = ele_type['hex']
         try:
@@ -161,6 +315,7 @@ class SpanBase(Region):
         # Get operator
         mesh_op = self._get_mesh_op(etype, mesh_avg.shape[0])
         mesh_avg = np.einsum('ij,jkl -> ikl', mesh_op, mesh_avg)
+        """
 
         # Flash ro disk
         #self._flash_to_disk(self.dir, mesh_avg)
@@ -170,11 +325,21 @@ class SpanBase(Region):
             for kid, eids in zeleid[id]:
                 f[f'zeleid/{id}/{kid}'] = eids
 
-        f['idlist'] = np.array(idlist)
-        f['index'] = index1[0]
+        for id in idlist:
+            for k, v in enumerate(idlist[id]):
+                f[f'idlist/{id}/{k}'] = v
+            for k, v in enumerate(index[id]):
+                f[f'index/{id}/{k}'] = v
+        for id, v in enumerate(sortid):
+            f[f'sortid/{id}'] = v
+
+        for k in mesh_wall:
+            f[f'mesh_wall/{k}'] = mesh_wall[k]
+        for k, v in enumerate(lookup):
+            f[f'lookup/{v}'] = k
         f.close()
 
-        return idlist, index1
+        #return idlist, index1
 
 
     def mesh_sort(self, mesh):
@@ -184,7 +349,7 @@ class SpanBase(Region):
         loc = [np.linalg.norm(mesh[0,0,:2] - mesh[0,i,:2], axis = 0) < self.tol
                                         for i in range(neles)]
         if not all(loc):
-            idx = []
+            idx = defaultdict(list)
             _map = self._linmap(self.meshord+1)['hex']
             mesh = mesh[_map]
             msh = mesh[:,0]
@@ -201,19 +366,20 @@ class SpanBase(Region):
                         nid += 1
                         index.append(dlist)
 
-                    idx.append(id)
+                    idx[nid].append(id)
 
-            return idx, index
+            return [v for k, v in idx.items()], index
+        else:
+            return [], []
 
     def highorderproc(self, index, order):
-        print('Just tabulate it until I found a way to write it efficiently')
+        """Just tabulate it until I found a way to write it efficiently"""
         n = order + 1
         for i in range(n**2):
             if i == 0:
                 oindex = np.arange(n**3-n,n**3,1)
             else:
                 oindex = np.append(oindex, np.arange(n**3-n*(i+1),n**3-n*i,1))
-
         return oindex
 
 
@@ -231,12 +397,12 @@ class SpanBase(Region):
             lookup.append(k)
         return mesh, lookup
 
-    def _load_snapshot(self, name, region):
+    def _load_snapshot(self, name, region, lookup):
         soln = []
         f = h5py.File(name, 'r')
-        for k in region:
-            _, etype, part = k.split('_')
+        for kid, key in lookup.items():
+            _, etype, part = key.split('_')
             kk = f'{self.dataprefix}_{etype}_{part}'
-            soln.append(np.array(f[kk])[...,region[k]].swapaxes(1,-1))
+            soln.append(np.array(f[kk])[...,region[key]].swapaxes(1,-1))
         f.close()
         return soln
