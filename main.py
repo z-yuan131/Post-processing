@@ -7,6 +7,7 @@ from collections import defaultdict
 #from functions.spectra import Spectra
 from feature.region import Region
 from feature.spanproc import SpanBase
+from feature.probes import Probes
 
 
 from pyfr.inifile import Inifile
@@ -41,15 +42,13 @@ def main():
 
     arg, cfg = config_file()
 
-
-    fname = 'func-spanavg'
-    #Region(arg, cfg, fname).get_wall_O_grid()
-    SpanBase(arg, cfg, fname).spanfft()
-    #if 'func-spanavg' in cfg.sections():
-    #    fname = 'func-spanavg'
-    #    SpanAverage(arg, cfg, fname).spanavg()
-    #import numpy as np
-    #Probes(arg).mainproc(np.array([[100,100,-9],[100,20,-6]]))
+    if 'func-spanavg' in cfg.sections():
+        fname = 'func-spanavg'
+        Region(arg, cfg, fname).get_wall_O_grid()
+        SpanBase(arg, cfg, fname).spanfft()
+    if 'func-probes' in cfg.sections():
+        fname = 'func-probes'
+        Probes(arg, cfg, fname).mainproc()
 
     #Spectra().process_data_cylinder2()
 
