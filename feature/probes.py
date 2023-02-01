@@ -8,6 +8,7 @@ from pyfr.readers.native import NativeReader
 from pyfr.quadrules import get_quadrule
 from pyfr.util import subclasses
 from pyfr.shapes import BaseShape
+from pyfr.mpiutil import get_comm_rank_root, mpi
 
 import matplotlib.pyplot as plt
 
@@ -15,8 +16,8 @@ import matplotlib.pyplot as plt
 class Probes(Base):
     def __init__(self, argv, icfg, fname):
         super().__init__(argv)
-        self.exactloc = icfg.getbool(fname, 'exactloc', False)
-        npts = icfg.getint(fname, 'npts', 1)
+        self.exactloc = icfg.getbool(fname, 'exactloc', True)
+        npts = icfg.getliteral(fname, 'npts', [1])
         # List of points to be sampled and format
         pointA = icfg.getliteral(fname, 'samp-ptsA')
         pointB = icfg.getliteral(fname, 'samp-ptsB', None)
@@ -25,8 +26,9 @@ class Probes(Base):
         self.mode = icfg.get(fname, 'mode', 'mesh')
 
         self.preprocpts(pointA, pointB, npts)
-        print(self.pts)
-
+        print(len(self.pts))
+        if self.exactloc == False:
+            raise NotImplementedError('not finished yet, use exact location instead.')
 
     def preprocpts(self, pta, ptb, npts):
         if ptb == None:
@@ -36,50 +38,14 @@ class Probes(Base):
                 raise RuntimeError('Length of points lists should match.')
             self.pts = []
             for id in range(len(pta)):
-                lt = [np.linspace(pta[id][i],ptb[id][i], npts)
+                lt = [np.linspace(pta[id][i],ptb[id][i], npts[id])
                                                 for i in range(self.ndims)]
                 if self.ndims == 3:
                     self.pts += [np.array([x,y,z]) for x,y,z in zip(*lt)]
                 else:
                     self.pts += [np.array([x,y]) for x,y in zip(*lt)]
 
-
-    def pre_process2(self):
-        self.mesh_bg = list()
-        self.mesh_bg_vis = list()
-        self.mesh_trans = list()
-        self.lookup = list()
-
-        # Use a strictly interior point set
-        qrule_map = {
-            'quad': 'gauss-legendre',
-            'tri': 'williams-shunn',
-            'hex': 'gauss-legendre',
-            'pri': 'williams-shunn~gauss-legendre',
-            'pyr': 'gauss-legendre',
-            'tet': 'shunn-ham'
-        }
-
-
-        for key in self.mesh:
-            if 'spt' in key.split('_'):
-                _,etype,part = key.split('_')
-                soln_name = f'{self.dataprefix}_{etype}_{part}'
-                nupts = self.soln[soln_name].shape[0]
-
-                # Get Operators
-                nspts = self.mesh[key].shape[0]
-                upts = get_quadrule(etype, qrule_map[etype], nupts).pts
-
-                mesh_op = self._get_ops_interp(nspts, etype, upts, nupts, self.order)
-                mesh_op_vis = self._get_vis_op(nspts, etype, self.order)
-
-                self.mesh_bg.append(np.einsum('ij, jkl -> ikl',mesh_op,self.mesh[key]))
-                self.mesh_bg_vis.append(np.einsum('ij, jkl -> ikl',mesh_op_vis,self.mesh[key]))
-                self.mesh_trans.append(upts)
-                self.lookup.append((etype,part))
-
-    def data_process(self, option, elepts = []):
+    def data_process(self, option, argv = []):
         # Use a strictly interior point set
         qrule_map = {
             'quad': 'gauss-legendre',
@@ -91,6 +57,42 @@ class Probes(Base):
         }
 
         if option == 'bg':
+            mesh = list()
+            mesh_trans = list()
+            lookup = list()
+
+            comm, rank, root = get_comm_rank_root()
+            size = comm.Get_size()
+            if size > len(list(self.mesh.keys())):
+                raise RuntimeError('Use less mpi ranks.')
+
+            if rank == 0:
+                kk = [key for key in self.mesh if 'spt' in key.split('_')]
+            else:
+                kk = None
+            kk = comm.bcast(kk, root = 0)
+            from itertools import cycle
+            for r, k in zip(cycle(np.arange(size)), kk):
+                if r == rank:
+                    _,etype,part = k.split('_')
+                    # create lookup dictionary
+                    lookup.append((etype,part))
+
+            for etype,part in lookup:
+                # Get Operators
+                soln_name = f'{self.dataprefix}_{etype}_{part}'
+                key = f'spt_{etype}_{part}'
+                nupts = self.soln[soln_name].shape[0]
+                nspts = self.mesh[key].shape[0]
+                upts = get_quadrule(etype, qrule_map[etype], nupts).pts
+                mesh_op = self._get_ops_interp(nspts, etype, upts, nupts, self.order)
+
+                mesh.append(np.einsum('ij, jkl -> ikl',mesh_op,self.mesh[key]))
+                mesh_trans.append(upts)
+
+            return mesh, mesh_trans, lookup
+
+        elif option == 'bg2':
             mesh = list()
             mesh_trans = list()
             self.lookup = list()
@@ -112,17 +114,14 @@ class Probes(Base):
 
         elif option == 'vis':
             mesh = list()
-            for id, (etype, part) in enumerate(self.lookup):
-                if not elepts[id]:
-                    mesh.append([])
-                    continue
+            for id, key in enumerate(argv):
+                etype, part = key.split('_')
                 key = f'spt_{etype}_{part}'
                 nspts = self.mesh[key].shape[0]
                 # Operator
                 mesh_op_vis = self._get_vis_op(nspts, etype, self.order)
                 mesh.append(np.einsum('ij, jkl -> ikl',mesh_op_vis,self.mesh[key]))
             return mesh
-
 
     def mainproc(self):
         # Prepare for MPI process
@@ -133,57 +132,68 @@ class Probes(Base):
 
         # Only root rank is enough to process data
         if self.mode == 'mesh':
-            if rank == 0:
-                ptsinfo = self.procpts(self.pts)
-                self.dump_to_file(ptsinfo)
+            ptsinfo = self.procpts(self.pts, comm)
             return 0
         else:
+            if len(self.time) < size:
+                raise RuntimeError('The number of Mpi rank is more than time series.')
             if rank == 0:
-                solninfo, intop, ploc, lookup = self.load_ptsinfo()
+                 ptsinfo, lookup = self.load_ptsinfo()
+                 if self.exactloc:
+                     ptsinfo = self._refine_pts(ptsinfo, lookup)
             else:
-                solninfo = None
+                ptsinfo = None
                 lookup = None
-                intop = None
 
         # Boardcast pts and eles information
-        solninfo = comm.bcast(solninfo, root=0)
+        ptsinfo = comm.bcast(ptsinfo, root=0)
         lookup = comm.bcast(lookup, root=0)
-        intop = comm.bcast(intop, root=0)
 
         comm.barrier()
 
         # Get time series
         time = self.get_time_series_mpi(rank, size)
-        if len(time) > 0:
-            soln_op = self._get_op_sln(solninfo, lookup)
-            for t in time:
-                self.procsoln(t, solninfo, lookup, soln_op, intop)
 
-        print(rank, time)
+        # Process information
+        eidinfo, intopinfo, soln_op, plocs = self.procinf(ptsinfo, lookup)
+        pts = {}
+        for t in time:
+            pts[t] = self.procsoln(t, eidinfo, intopinfo, lookup, soln_op)
 
+        # Collect all points
+        pts = comm.gather(pts, root = 0)
 
+        # Dump to h5 file
+        if rank == 0:
+            self.dump_to_h5(pts, plocs)
 
-    def procsoln(self, time, solninfo, lookup, soln_op, intop):
-        soln = f'{self.solndir}{time}.pyfrs'
-        soln = self._load_snapshot(soln, solninfo, lookup, soln_op)
-        print(len(soln))
-
-
-    def _load_snapshot(self, name, solninfo, lookup, soln_op):
-        soln = []
-        f = h5py.File(name,'r')
-        for k in solninfo:
-            etype,part = lookup[k].split('_')
-            key = f'{self.dataprefix}_{etype}_{part}'
-            sln = np.array(f[key])[...,solninfo[k]]
-            sln = np.einsum('ij, jkl -> ikl',soln_op[k],sln)
-            soln.append(sln)
+    def dump_to_h5(self, pts, ploc):
+        soln = np.zeros([len(self.time), len(self.pts), self.nvars])
+        for tpt in pts:
+            for t, pt in tpt.items():
+                index = self.time.index(t)
+                soln[index] = np.array(pt)
+        f = h5py.File(f'{self.dir}/probes.s','w')
+        f['soln'] = soln
+        f['pts'] = np.array(ploc)
         f.close()
-        return soln
 
-    def _get_op_sln(self, solninfo, lookup):
+    def procinf(self, ptsinfo, lookup):
+        # Process information
+        kids, eids, plocs, intops = zip(*ptsinfo)
+        eidinfo = defaultdict(list)
+        intopinfo = defaultdict(list)
+        for kid, eid, intop in zip(kids, eids, intops):
+            eidinfo[kid].append(eid)
+            intopinfo[kid].append(intop)
+
+        soln_op = self._get_op_sln(kids, lookup)
+        return eidinfo, intopinfo, soln_op, plocs
+
+    def _get_op_sln(self, kids, lookup):
+        kids = list(set(kids))
         soln_op = {}
-        for k in solninfo:
+        for k in kids:
             etype,part = lookup[k].split('_')
             key = f'{self.dataprefix}_{etype}_{part}'
             nspts = self.soln[key].shape[0]
@@ -191,64 +201,165 @@ class Probes(Base):
             soln_op[k] = self._get_soln_op(etype, nspts)
         return soln_op
 
+    def procsoln(self, time, eidinfo, intops, lookup, soln_op):
+        soln = f'{self.solndir}{time}.pyfrs'
+        soln = self._load_snapshot(soln, eidinfo, lookup, soln_op)
+
+        return [intops[k][id] @ soln[k][...,id] for k in intops for id in range(len(intops[k]))]
+
+
+
+
+    def _load_snapshot(self, name, eidinfo, lookup, soln_op):
+        soln = defaultdict()
+        f = h5py.File(name,'r')
+        for k in soln_op:
+            etype,part = lookup[k].split('_')
+            key = f'{self.dataprefix}_{etype}_{part}'
+            sln = np.array(f[key])[...,eidinfo[k]]
+            sln = np.einsum('ij, jkl -> ikl',soln_op[k],sln)
+            try:
+                soln[k] = np.append(soln[k], sln, axis = -1)
+            except KeyError:
+                soln[k] = sln
+        f.close()
+        return soln
+
+    def _refine_pts(self, ptsinfo, lookup):
+        # Use visualization points to do refinement to improve stability of the code
+        elelist = self.data_process('vis', lookup)
+
+        # Mapping from nupts to element type
+        ordplusone = self.order + 1
+        etype_map = {
+            ordplusone**2: 'quad',
+            ordplusone*(ordplusone+1)/2: 'tri',
+            ordplusone**3: 'hex',
+            ordplusone**2*(ordplusone+1)/2: 'pri',
+            ordplusone*(ordplusone+1)*(2*ordplusone+1)/6: 'pyr',
+            ordplusone*(ordplusone+1)*(ordplusone+2)/6: 'tet'
+        }
+
+        # Get basis class map
+        basismap = {b.name: b for b in subclasses(BaseShape, just_leaf=True)}
+
+        ptsinfon = []
+        # Loop over all the points for each element type
+        for etype, (eles, epts) in enumerate(zip(elelist, ptsinfo)):
+
+            idx, eidx, tlocs = zip(*epts)
+            spts = eles[:, eidx, :]
+            eletype = etype_map.get(len(spts))
+            plocs = [self.pts[i] for i in idx]
+
+            # Use Newton's method to find the precise transformed locations
+            basis = basismap[eletype](len(spts), self.cfg)
+            ntlocs, nplocs = self._plocs_to_tlocs(basis.sbasis, spts, plocs,
+                                             tlocs)
+
+            # Form the corresponding interpolation operators
+            ops = basis.ubasis.nodal_basis_at(ntlocs)
+
+            # Do interpolation on the corresponding elements
+            #new_sln = np.einsum('ij,jki -> ik', ops, soln[:, :, eidx])
+            # Append index and solution of each point
+            #ptsinfo.extend(info for info in zip(idx, new_sln))
+
+            # Append to the point info list
+            ptsinfon.extend(
+                (*info, etype) for info in zip(idx, eidx, nplocs, ops)
+            )
+
+        # Resort to the original index
+        ptsinfon.sort()
+
+        # Strip the index, move etype to the front, and return
+        return [(etype, *info) for idx, *info, etype in ptsinfon]
+        #return np.array([new_sln for idx, new_sln in ptsinfo])
+
+
+    def _plocs_to_tlocs(self, sbasis, spts, plocs, tlocs):
+        plocs, itlocs = np.array(plocs), np.array(tlocs)
+
+        # Set current tolerance
+        tol = 3e-9
+
+        # Evaluate the initial guesses
+        iplocs = np.einsum('ij,jik->ik', sbasis.nodal_basis_at(itlocs), spts)
+
+        # Iterates
+        kplocs, ktlocs = iplocs.copy(), itlocs.copy()
+
+        # Output array
+        oplocs, otlocs = iplocs.copy(), itlocs.copy()
+
+        indexp = [*range(len(kplocs))]
+        # Apply maximum ten iterations of Newton's method
+        for k in range(100):
+            # Get Jacobian operators
+            jac_ops = sbasis.jac_nodal_basis_at(ktlocs)
+            # Solve from ploc to tloc
+            kjplocs = np.einsum('ijk,jkl->kli', jac_ops, spts)
+            ktlocs -= np.linalg.solve(kjplocs, kplocs - plocs)
+            # Transform back to ploc
+            ops = sbasis.nodal_basis_at(ktlocs)
+            np.einsum('ij,jik->ik', ops, spts, out=kplocs)
+
+            # Apply check routine
+            kdists = np.linalg.norm(plocs - kplocs, axis=1)
+            # Get the points satisfied criterion
+            index = np.where(kdists < tol)[0]
+            index = [id for id in index if id in indexp]
+            indexp = list(set(indexp) - set(index))
+            #print(indexp, kdists)
+            if len(index) != 0:
+                oplocs[index], otlocs[index] = kplocs[index], ktlocs[index]
+            if len(indexp) == 0:
+                break
+            if k == 99:
+                """Currently only precise location is acceptable"""
+                raise RuntimeError(f'warning: failed to apply Newton Method, tol: {tol}, dist: {kdists}, loc: {plocs[indexp]}')
+                # Compute the initial and final distances from the target location
+                idists = np.linalg.norm(plocs - iplocs, axis=1)
+
+                # Replace any points which failed to converge with their initial guesses
+                closer = np.where(idists < kdists)
+                otlocs[closer] = itlocs[closer]
+                oplocs[closer] = iplocs[closer]
+
+
+        return otlocs, oplocs
+
+
     def load_ptsinfo(self):
-        f = h5py.File('probes.m','r')
-        lookup = {}
+        f = h5py.File(f'{self.dir}/probes.m','r')
+        eleinfo = {}
+        tloc = {}
+        id = {}
+
         for i in f:
-            if i == 'trank':
-                trank = np.array(f[i])
-            if i == 'eid':
-                eid = np.array(f[i])
-            if i == 'ploc':
-                ploc = np.array(f[i])
-            if i == 'op':
-                op = np.array(f[i])
-            if i == 'lookup':
-                for id in np.array(f[i]):
-                    idx = int(np.array(f[f'{i}/{id}']))
-                    lookup[idx] = id
+            eleinfo[i] = np.array(f[f'{i}/eid'])
+            tloc[i] = np.array(f[f'{i}/tloc'])
+            id[i] = np.array(f[f'{i}/id'])
         f.close()
 
-        solninfo = defaultdict(list)
-        intop = defaultdict(list)
-        ploc = defaultdict(list)
-        for itrank, ieid, iploc, iop in zip(trank, eid, ploc, op):
-            solninfo[itrank].append(ieid)
-            intop[itrank].append(iop)
-            ploc[itrank].append(ploc)
+        ptsinfo = []
+        lookup = []
+        for key, eids in eleinfo.items():
+            lookup.append(key)
+            pts = []
+            for _id, _eid, _tloc in zip(id[key], eids, tloc[key]):
+                pts.append((_id, _eid, _tloc))
+            ptsinfo.append(pts)
 
-        return solninfo, intop, ploc, lookup
-
-        #lookup = [(v.split('_')[0], v.split('_')[1]) for k,v in lookup.items()]
-        #return trank, lookup, [(itrank, ieid, iop) for itrank, ieid, iop
-        #                                            in zip(trank, eid, op)]
+        return ptsinfo, lookup
 
 
-    def dump_to_file(self, ptsinfo):
-        f = h5py.File(f'{self.dir}/probes.m','w')
-        if self.exactloc == True:
-            trank = []
-            eid = []
-            ploc = []
-            op = []
-            for _trank, _eid, _ploc, _op in ptsinfo:
-                trank.append(_trank)
-                eid.append(_eid)
-                ploc.append(_ploc)
-                op.append(_op)
+    def procpts(self, pts, comm):
+        # Get mpi info
+        comm, rank, root = get_comm_rank_root()
 
-            f[f'trank'] = np.array(trank)
-            f[f'eid'] = np.array(eid)
-            f[f'ploc'] = np.array(ploc)
-            f[f'op'] = np.array(op)
-            for id, (etype, part) in enumerate(self.lookup):
-                f[f'lookup/{etype}_{part}'] = id
-        f.close()
-
-
-    def procpts(self, pts):
-
-        mesh, mesh_trans = self.data_process('bg')
+        mesh, mesh_trans, lookup = self.data_process('bg')
 
         outpts = list()
 
@@ -257,43 +368,55 @@ class Probes(Base):
         del mesh
 
         # Sample points we're responsible for, grouped by element type + part
-        elepts = [[] for i in range(len(self.mesh_inf))]
+        elepts = [[] for i in range(len(lookup))]
+
 
         # If we are looking for the exact locations
         if self.exactloc:
             # For each sample point find our nearest search location
             for i, (dist, trank, (uidx, eidx)) in enumerate(closest):
-                elepts[trank].append((i, eidx, mesh_trans[trank][uidx]))
+                # Reduce over the distance
+                _, mrank = comm.allreduce((dist, rank), op=mpi.MINLOC)
+
+                if rank == mrank:
+                    elepts[trank].append((i, eidx, mesh_trans[trank][uidx]))
             del mesh_trans
 
-            #raise NotImplementedError('refinement needs some process before output')
-            # Refine
-            #outpts.append(self._refine_pts(elepts, pts).reshape(nupts,
-            #                                neles, self.nvars).swapaxes(1,2))
+            elepts = comm.gather(elepts, root = 0)
+            lookup = comm.gather(lookup, root = 0)
+            if rank == 0:
+                ptsinfo = {}
+                for id, elept in enumerate(elepts):
+                    for pt, lp in zip(elept, lookup[id]):
+                        if pt:
+                            ptsinfo[lp] = pt
 
-            ourpts = self._refine_pts(elepts, pts)
-
-            # Perform the sampling and interpolation
-            #samples = [op @ solns[et][:, :, ei] for et, ei, _, op in self._ourpts]
-            return ourpts
+                self.dump_to_file(ptsinfo)
         else:
+            rasie NotImplementedError()
             # For each sample point find our nearest search location
             for i, (dist, trank, (uidx, eidx)) in enumerate(closest):
                 elepts[trank].append((i, eidx, uidx, trank))
 
             return elepts
 
-    def load_snapshot(self, name):
-        soln = defaultdict()
-        f = h5py.File(name, 'r')
-        for i in f:
-            kk = i.split('_')
-            if self.dataprefix in kk:
-                soln[i] = np.array(f[i])
+    def dump_to_file(self, ptsinfo):
+        f = h5py.File(f'{self.dir}/probes.m','w')
+        for key in ptsinfo:
+            k = f'{key[0]}_{key[1]}'
+            eid = []
+            id = []
+            tloc = []
+            for _id, _eid, _tloc in ptsinfo[key]:
+                eid.append(_eid)
+                tloc.append(_tloc)
+                id.append(_id)
 
+            f[f'{k}/eid'] = np.array(eid)
+            f[f'{k}/id'] = np.array(id)
+            f[f'{k}/tloc'] = np.array(tloc)
         f.close()
 
-        return soln
 
     def _closest_pts(self, epts, pts):
         # Use brute force to find closest pts
@@ -313,177 +436,3 @@ class Probes(Base):
 
             # Find the minimum across all element types and mpi ranks
             yield min(zip(dmins, range(len(epts)), amins))
-
-
-
-    def _refine_pts(self, elepts, pts):
-        # Use visualization points to do refinement to improve stability of the code
-        elelist = self.data_process('vis', elepts)
-        ptsinfo = []
-
-        # Mapping from nupts to element type
-        ordplusone = self.order + 1
-        etype_map = {
-            ordplusone**2: 'quad',
-            ordplusone*(ordplusone+1)/2: 'tri',
-            ordplusone**3: 'hex',
-            ordplusone**2*(ordplusone+1)/2: 'pri',
-            ordplusone*(ordplusone+1)*(2*ordplusone+1)/6: 'pyr',
-            ordplusone*(ordplusone+1)*(ordplusone+2)/6: 'tet'
-        }
-
-        # Get basis class map
-        basismap = {b.name: b for b in subclasses(BaseShape, just_leaf=True)}
-
-        # Loop over all the points for each element type
-        for etype, (eles, epts) in enumerate(zip(elelist, elepts)):
-            if not epts:
-                continue
-
-            idx, eidx, tlocs = zip(*epts)
-            spts = eles[:, eidx, :]
-            eletype = etype_map.get(len(spts))
-            plocs = [pts[i] for i in idx]
-
-            # Use Newton's method to find the precise transformed locations
-            basis = basismap[eletype](len(spts), self.cfg)
-            ntlocs, nplocs = self._plocs_to_tlocs(basis.sbasis, spts, plocs,
-                                             tlocs)
-
-            # Form the corresponding interpolation operators
-            ops = basis.ubasis.nodal_basis_at(ntlocs)
-
-            # Do interpolation on the corresponding elements
-            #new_sln = np.einsum('ij,jki -> ik', ops, soln[:, :, eidx])
-            # Append index and solution of each point
-            #ptsinfo.extend(info for info in zip(idx, new_sln))
-
-            # Append to the point info list
-            ptsinfo.extend(
-                (*info, etype) for info in zip(idx, eidx, nplocs, ops)
-            )
-
-        # Resort to the original index
-        ptsinfo.sort()
-
-        # Strip the index, move etype to the front, and return
-        return [(etype, *info) for idx, *info, etype in ptsinfo]
-        #return np.array([new_sln for idx, new_sln in ptsinfo])
-
-
-    def _plocs_to_tlocs(self, sbasis, spts, plocs, tlocs):
-        plocs, itlocs = np.array(plocs), np.array(tlocs)
-
-        # Set current tolerance
-        tol = 10e-12
-
-        # Evaluate the initial guesses
-        iplocs = np.einsum('ij,jik->ik', sbasis.nodal_basis_at(itlocs), spts)
-
-        # Iterates
-        kplocs, ktlocs = iplocs.copy(), itlocs.copy()
-
-        # Apply maximum ten iterations of Newton's method
-        for k in range(10):
-            # Get Jacobian operators
-            jac_ops = sbasis.jac_nodal_basis_at(ktlocs)
-            # Solve from ploc to tloc
-            kjplocs = np.einsum('ijk,jkl->kli', jac_ops, spts)
-            ktlocs -= np.linalg.solve(kjplocs, kplocs - plocs)
-            # Transform back to ploc
-            ops = sbasis.nodal_basis_at(ktlocs)
-            np.einsum('ij,jik->ik', ops, spts, out=kplocs)
-
-            # Apply check routine
-            kdists = np.linalg.norm(plocs - kplocs, axis=1)
-            index = np.where(kdists > tol)[0]
-            if len(index) == 0:
-                break
-            if k == 9:
-                """Currently only precise location is acceptable"""
-                raise RuntimeError(f'warning: failed to apply Newton Method, tol: {tol}, dist: {kdists}')
-                # Compute the initial and final distances from the target location
-                idists = np.linalg.norm(plocs - iplocs, axis=1)
-
-                # Replace any points which failed to converge with their initial guesses
-                closer = np.where(idists < kdists)
-                ktlocs[closer] = itlocs[closer]
-                kplocs[closer] = iplocs[closer]
-
-
-        return ktlocs, kplocs
-
-
-
-
-
-    def sort_time_series(self, elepts, time):
-        lookupid = defaultdict(list)
-        Npts = 0
-        for epts, lookup in zip(elepts,self.lookup):
-            if not epts:
-                continue
-            i, eidx, uidx, etype = zip(*epts)
-
-            lookupid[f'{lookup[0]}_{lookup[1]}'].append(uidx)
-            lookupid[f'{lookup[0]}_{lookup[1]}'].append(eidx)
-            Npts += len(eidx)
-
-        # Get information from solution field
-        soln_pts = np.zeros([Npts,self.nvars,len(time)])
-
-        for t in range(len(time)):
-            print(t)
-            soln = f'{self.solndir}{time[t]}.pyfrs'
-            soln = self.load_snapshot(soln)
-            sln = []
-            for kdx, idx in lookupid.items():
-                name = f'{self.dataprefix}_{kdx}'
-
-                #print(idx)
-                if len(sln) > 0:
-                    sln =  np.append(sln, soln[name][idx[0],:,idx[1]].reshape(-1,self.nvars), axis = 0)
-                else:
-                    sln = soln[name][idx[0],:,idx[1]].reshape(-1,self.nvars)
-
-            soln_pts[...,t] = sln
-
-        return soln_pts
-
-
-
-
-
-
-
-
-
-
-
-
-    def _flash_to_disk(self, outpts):
-        f = h5py.File('soln_pts.s','w')
-        for pts in range(len(outpts)):
-            f[f'soln_{pts}'] = outpts[pts]
-        f.close()
-
-
-
-
-    #"""
-    def _flash_to_disk(self, outpts):
-        # Prepare data for output
-        self.cfg.set('solver','order',self.nwmsh_ord)
-
-        import h5py
-
-        f = h5py.File(f'{self.dir_name}','w')
-        f['config'] = self.cfg.tostr()
-        f['mesh_uuid'] = self.uuid
-        f['stats'] = self.stats.tostr()
-
-        for id, (etype, part) in enumerate(self.mesh_new_info):
-            name = f'{self.dataprefix}_{etype}_{part}'
-            f[name] = outpts[id]
-        f.close()
-    #"""
