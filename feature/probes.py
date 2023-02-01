@@ -282,7 +282,7 @@ class Probes(Base):
         plocs, itlocs = np.array(plocs), np.array(tlocs)
 
         # Set current tolerance
-        tol = 3e-9
+        tol = 5e-9
 
         # Evaluate the initial guesses
         iplocs = np.einsum('ij,jik->ik', sbasis.nodal_basis_at(itlocs), spts)
@@ -393,7 +393,7 @@ class Probes(Base):
 
                 self.dump_to_file(ptsinfo)
         else:
-            rasie NotImplementedError()
+            raise NotImplementedError()
             # For each sample point find our nearest search location
             for i, (dist, trank, (uidx, eidx)) in enumerate(closest):
                 elepts[trank].append((i, eidx, uidx, trank))
