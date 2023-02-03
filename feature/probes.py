@@ -10,9 +10,6 @@ from pyfr.util import subclasses
 from pyfr.shapes import BaseShape
 from pyfr.mpiutil import get_comm_rank_root, mpi
 
-import matplotlib.pyplot as plt
-
-
 class Probes(Base):
     def __init__(self, argv, icfg, fname):
         super().__init__(argv)

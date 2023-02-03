@@ -7,7 +7,7 @@ import h5py
 from pyfr.readers.native import NativeReader
 from pyfr.quadrules import get_quadrule
 
-import matplotlib.pyplot as plt
+#import matplotlib.pyplot as plt
 #import matplotlib.tri as tri
 
 """
@@ -34,17 +34,22 @@ class Region(Base):
     def __init__(self, argv, icfg, fname):
         super().__init__(argv)
         self.layers = icfg.getint(fname, 'layers', 0)
-        self.suffix = ['hex'] #icfg.get(fname, 'etype')
-        self.boundary_name = ['wall']#icfg.get(fname, 'bname')
+        #self.suffix = ['hex'] #icfg.get(fname, 'etype')
+        self.suffix = icfg.get(fname, 'etype')
+        self.boundary_name = icfg.get(fname, 'bname')
 
         if self.boundary_name == None:
             raise RuntimeError('Region has to be attached to a boundary.')
 
         if self.suffix == None:
-            self.suffix = ['quad','tri','hex','tet','pri','pyr']
+            self.suffix = ['hex'] #['quad','tri','hex','tet','pri','pyr']
+        else:
+            self.suffix = self.suffix[1:-1].split(", ")
+        self.boundary_name = self.boundary_name[1:-1].split(", ")
 
         mesh_part = self.mesh.partition_info('spt')
 
+        # Use strict element type for O grids
         self.suffix_parts = np.where(np.array(mesh_part['hex']) > 0)[0]
         self.suffix_parts = [f'p{i}' for i in self.suffix_parts]
 
