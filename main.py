@@ -8,6 +8,7 @@ from collections import defaultdict
 from feature.region import Region
 from feature.spanproc import SpanBase
 from feature.probes import Probes
+from feature.grad import Gradient
 
 
 from pyfr.inifile import Inifile
@@ -34,7 +35,8 @@ def config_file():
     tstart = cfg.getfloat('time-series','tstart')
     tend = cfg.getfloat('time-series','tend')
     dt = cfg.getfloat('time-series','dt')
-    arg['series_time'] = [tstart, tend, dt]
+    fmat = cfg.get('time-series','fmat')
+    arg['series_time'] = [tstart, tend, dt, fmat]
 
     return arg, cfg
 
@@ -49,6 +51,9 @@ def main():
     if 'func-probes' in cfg.sections():
         fname = 'func-probes'
         Probes(arg, cfg, fname).mainproc()
+    if 'func-gradient' in cfg.sections():
+        fname = 'func-gradient'
+        Gradient(arg, cfg, fname).gradproc()
 
     #Spectra().process_data_cylinder2()
 
