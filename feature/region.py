@@ -55,6 +55,7 @@ class Region(Base):
 
     def get_boundary(self):
         mesh_wall = defaultdict(list)
+        mesh_wall_fid = defaultdict(list)
         mesh_wall_tag = list()
         # Get first level wall mesh
         for key in self.mesh:
@@ -66,6 +67,7 @@ class Region(Base):
                     for etype, eid, fid, pid in self.mesh[key][['f0','f1','f2','f3']].astype('U4,i4,i1,i2'):
                         if etype in self.suffix:
                             mesh_wall[f'spt_{etype}_{part}'].append(eid)
+                            mesh_wall_fid[f'spt_{etype}_{part}'].append(fid)
 
                             # Tag all elements in the set as belonging to the first layer
                             if isinstance(mesh_wall_tag, list):
@@ -75,13 +77,13 @@ class Region(Base):
                             else:
                                 mesh_wall_tag.update({part: {(etype, eid): 0}})
 
-        return mesh_wall_tag, mesh_wall
+        return mesh_wall_tag, mesh_wall, mesh_wall_fid
 
 
 
     def get_wall_O_grid(self):
         # Get O-grid meshes
-        mesh_wall_tag, mesh_wall = self.get_boundary()
+        mesh_wall_tag, mesh_wall, _ = self.get_boundary()
 
         # For single rank process, we'd better to pre load connectivities
         con = defaultdict(list)

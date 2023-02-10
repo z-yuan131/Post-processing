@@ -6,7 +6,7 @@ import h5py
 
 from pyfr.readers.native import NativeReader
 from pyfr.quadrules import get_quadrule
-from pyfr.util import subclass_where
+from pyfr.util import subclass_where, subclasses
 from pyfr.shapes import BaseShape
 
 class Gradient(Region):
@@ -20,9 +20,11 @@ class Gradient(Region):
         )
         self.elementscls = self.systemscls.elementscls
 
+        self.bl_support = icfg.get(fname, 'blsupport', True)
+
     def _get_eles(self):
-        _, mesh_wall = self.get_boundary()
-        return mesh_wall
+        _, mesh_wall, fids = self.get_boundary()
+        return mesh_wall, fids
 
     def gradproc(self):
         # Prepare for MPI process
@@ -32,10 +34,9 @@ class Gradient(Region):
         size = comm.Get_size()
 
         if rank == 0:
-            mesh_wall = self._get_eles()
+            mesh_wall, fids = self._get_eles()
 
-            mesh = self._pre_proc_mesh(mesh_wall)
-            self._flash_to_disk(mesh)
+            mesh = self._pre_proc_mesh(mesh_wall, fids)
 
         else:
             mesh = None
@@ -50,18 +51,40 @@ class Gradient(Region):
         time = self.get_time_series_mpi(rank, size)
 
         soln_op = self._get_op_sln(mesh_wall)
-        for t in time:
-            self._proc_soln(t, mesh_wall, soln_op, mesh)
+
+        if self.bl_support:
+            bl_op = self._get_op_bl(mesh)
+            for t in time:
+                self._proc_soln(t, mesh_wall, soln_op, mesh, bl_op)
+        else:
+            for t in time:
+                self._proc_soln(t, mesh_wall, soln_op, mesh)
+
+        if rank == 0:
+            if self.bl_support:
+                for etype in mesh:
+                    if etype in self.suffix:
+                        mesh[etype] = self._post_proc_fields(mesh[etype], bl_op[etype])
+            self._flash_to_disk(mesh)
 
 
-    def _proc_soln(self, time, mesh_wall, soln_op, mesh):
+    def _proc_soln(self, time, mesh_wall, soln_op, mesh, bl_op = []):
         soln = f'{self.solndir}{time}.pyfrs'
         soln = self._load_snapshot(soln, mesh_wall, soln_op)
 
         for etype in soln:
             soln[etype] = self._pre_proc_fields_grad(etype, mesh[etype], soln[etype])
+            if self.bl_support:
+                soln[etype] = self._post_proc_fields(soln[etype].swapaxes(1,-1), bl_op[etype])
 
         self._flash_to_disk(soln, time)
+
+    def _post_proc_fields(self, vars, m0):
+        ovars = []
+        for id, fid in enumerate(m0):
+            ovars.append(fid @ vars[:,id])
+
+        return np.array(ovars).swapaxes(0,1)
 
     def _flash_to_disk(self, array, t = []):
         if t:
@@ -84,7 +107,7 @@ class Gradient(Region):
             name = f'{self.dataprefix}_{etype}_{part}'
             sln = np.array(f[name])[...,mesh_wall[k]]
             sln = np.einsum('ij, jkl -> ikl',soln_op[etype],sln)
-            sln = self._pre_proc_fields_soln(sln)
+            sln = self._pre_proc_fields_soln(sln.swapaxes(0,1)).swapaxes(0,1)
             try:
                 soln[etype] = np.append(soln[etype], sln, axis = -1)
             except KeyError:
@@ -103,10 +126,37 @@ class Gradient(Region):
                 soln_op[etype] = self._get_soln_op(etype, nspts)
         return soln_op
 
+    def _get_op_bl(self, mesh):
+        basismap = {b.name: b for b in subclasses(BaseShape, just_leaf=True)}
+        bl_op = defaultdict(list)
+        for key in mesh:
+            if key in self.suffix:
+                msh = mesh[key]
+                fid = mesh[f'{key}_fid']
+
+                basis = basismap[key](msh.shape[0], self.cfg)
+                fpts = basis.facefpts
+                m0 = self._get_interp_mat(basis)
+
+                # Get surface mesh of hex type of elements
+                for id in fid:
+                    bl_op[key].append(m0[fpts[id]])
+        return bl_op
+
+    def _get_interp_mat(self, basis):
+        m0 = basis.m0
+        m = np.zeros(m0.shape)
+        for i in range(m0.shape[0]):
+            #index = np.where(m0[i] == np.max(m0[i]))[0]
+            #index = np.where(m0[i] == m0[0,0])[0]
+            #m[i,index] = 1
+            index = np.where(m0[i] != 0)[0]
+            m[i,index[0]] = 1
+        return m
 
 
 
-    def _pre_proc_mesh(self, mesh_wall):
+    def _pre_proc_mesh(self, mesh_wall, fids):
         mesh = {}
         for key, eles in mesh_wall.items():
             _, etype, part = key.split('_')
@@ -118,17 +168,20 @@ class Gradient(Region):
 
             try:
                 mesh[etype] = np.append(mesh[etype], msh, axis = 1)
+                mesh[f'{etype}_fid'] += fids[key]
             except KeyError:
                 mesh[etype] = msh
+                mesh[f'{etype}_fid'] = fids[key]
+
         return mesh
 
     def _pre_proc_fields_soln(self, soln):
         # Convert from conservative to primitive variables
         return np.array(self.elementscls.con_to_pri(soln, self.cfg))
 
-    def _pre_proc_fields_grad(self, name, mesh, soln):
+    def _pre_proc_fields_grad(self, name, mesh, soln_original):
         # Reduce solution size since only velocity gradient is interested
-        soln = soln[:,1:self.ndims+1]
+        soln = soln_original[:,1:self.ndims+1]
 
         # Dimensions
         nupts, nvars = soln.shape[:2]
@@ -155,17 +208,4 @@ class Gradient(Region):
                              dtype=self.dtype, casting='same_kind')
         gradsoln = gradsoln.reshape(nvars*self.ndims, nupts, -1)
 
-        return np.append(soln, gradsoln.swapaxes(0,1), axis = 1)
-
-
-    def main(self):
-        # Calculate node locations of VTU elements
-        vpts = mesh_vtu_op @ mesh.reshape(nspts, -1)
-        vpts = vpts.reshape(nsvpts, -1, self.ndims)
-
-        # Pre-process the solution
-        soln = self._pre_proc_fields(name, mesh, soln).swapaxes(0, 1)
-
-        # Interpolate the solution to the vis points
-        vsoln = soln_vtu_op @ soln.reshape(len(soln), -1)
-        vsoln = vsoln.reshape(nsvpts, -1, neles).swapaxes(0, 1)
+        return np.append(soln_original, gradsoln.swapaxes(0,1), axis = 1)
