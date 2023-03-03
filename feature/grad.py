@@ -129,32 +129,54 @@ class Gradient(Region):
     def _get_op_bl(self, mesh):
         basismap = {b.name: b for b in subclasses(BaseShape, just_leaf=True)}
         bl_op = defaultdict(list)
+        m0, fpts = {}, {}
         for key in mesh:
             if key in self.suffix:
                 msh = mesh[key]
                 fid = mesh[f'{key}_fid']
 
-                basis = basismap[key](msh.shape[0], self.cfg)
-                fpts = basis.facefpts
-                m0 = self._get_interp_mat(basis)
+                if key not in m0:
+                    basis = basismap[key](msh.shape[0], self.cfg)
+                    fpts[key] = basis.facefpts
+                    m0[key] = self._get_interp_mat(basis, key)
 
                 # Get surface mesh of hex type of elements
                 for id in fid:
-                    bl_op[key].append(m0[fpts[id]])
+                    bl_op[key].append(m0[key][fpts[key][id]])
         return bl_op
 
-    def _get_interp_mat(self, basis):
-        m0 = basis.m0
-        m = np.zeros(m0.shape)
-        for i in range(m0.shape[0]):
-            #index = np.where(m0[i] == np.max(m0[i]))[0]
-            #index = np.where(m0[i] == m0[0,0])[0]
-            #m[i,index] = 1
-            index = np.where(m0[i] != 0)[0]
-            m[i,index[0]] = 1
-        return m
+    def _get_interp_mat(self, basis, etype):
+        iqrule = self._get_std_ele(etype, basis.nupts, self.order)
+        iqrule = np.array(iqrule)
 
+        # Use strict solution points for quad and pri or line
+        if self.ndims == 3:
+            self.cfg.set('solver-elements-tri','soln-pts','williams-shunn')
+            self.cfg.set('solver-elements-quad','soln-pts','gauss-legendre')
+        else:
+            self.cfg.set('solver-elements-line','soln-pts','gauss-legendre')
 
+        m = []
+        for id0, (kind, proj, norm) in enumerate(basis.faces):
+            npts = basis.npts_for_face[kind](self.order)
+
+            qrule = self._get_std_ele(kind, npts, self.order)
+            qrule = np.array(qrule)
+
+            pts = self._proj_pts(proj, qrule)
+
+            # Search for closest point
+            m0 = np.zeros([npts, basis.nupts])
+            for id, pt in enumerate(pts):
+                idx = np.argsort(np.linalg.norm(iqrule - pt, axis = 1))
+                m0[id, idx[0]] = 1
+            m.append(m0)
+
+        return np.vstack(m)
+
+    def _proj_pts(self, projector, pts):
+        pts = np.atleast_2d(pts.T)
+        return np.vstack(np.broadcast_arrays(*projector(*pts))).T
 
     def _pre_proc_mesh(self, mesh_wall, fids):
         mesh = {}
