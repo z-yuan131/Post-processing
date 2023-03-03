@@ -205,7 +205,7 @@ class SpanBase(Region):
             else:
                 soln[:,j] = sln[:,i]
                 j += 1
-
+        print(soln.shape)
         return np.fft.fft(soln, axis = 1)[:,self.nfft]
 
 
@@ -403,6 +403,21 @@ class SpanBase(Region):
         for kid, key in lookup.items():
             _, etype, part = key.split('_')
             kk = f'{self.dataprefix}_{etype}_{part}'
-            soln.append(np.array(f[kk])[...,region[key]].swapaxes(1,-1))
+            sln = np.array(f[kk])[...,region[key]].swapaxes(1,-1)
+            npts, nele, nvars = sln.shape
+            sln = np.array(self._con_to_pri(sln.reshape(-1,nvars).T)).T
+            soln.append(sln.reshape(npts, nele, nvars))
         f.close()
         return soln
+
+    def _con_to_pri(self, cons):
+        rho, E = cons[0], cons[-1]
+
+        # Divide momentum components by rho
+        vs = [rhov/rho for rhov in cons[1:-1]]
+
+        # Compute the pressure
+        gamma = self.cfg.getfloat('constants', 'gamma')
+        p = (gamma - 1)*(E - 0.5*rho*sum(v*v for v in vs))
+
+        return [rho] + vs + [p]
