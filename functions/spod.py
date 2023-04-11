@@ -24,7 +24,7 @@ import matplotlib.pyplot as plt
 
 # -------------------------------------------------------------------------
 # main function
-def spod(x,dt,save_path,weight='default',nOvlp='default',nDFT='default',window='default',
+def spod(x,dt,save_path,sname,weight='default',nOvlp='default',nDFT='default',window='default',
          method='lowRAM'):
     '''
     Purpose: main function of spectral proper orthogonal decomposition
@@ -146,7 +146,7 @@ def spod(x,dt,save_path,weight='default',nOvlp='default',nDFT='default',window='
         P = np.zeros((nFreq,nx,nBlks),dtype = complex) # RAM demanding here
 
     elif method == 'lowRAM':
-        h5f = h5py.File(os.path.join(save_path,'SPOD_LPf.h5'), 'w')
+        h5f = h5py.File(os.path.join(save_path,f'SPOD_LPf_{sname}'), 'w')
         h5f.create_dataset('L', shape=(nFreq,nBlks), compression="gzip")
         h5f.create_dataset('P', shape=(nFreq,nx,nBlks), chunks=True, dtype = complex, compression="gzip")
         h5f.create_dataset('f', data=f, compression="gzip")
@@ -185,7 +185,7 @@ def spod(x,dt,save_path,weight='default',nOvlp='default',nDFT='default',window='
     print('Saving SPOD results...'                )
 
     if method == 'fast':
-        h5f = h5py.File(os.path.join(save_path,'SPOD_LPf.h5'), 'w')
+        h5f = h5py.File(os.path.join(save_path,f'SPOD_LPf_{sname}'), 'w')
         h5f.create_dataset('L', data=L, compression="gzip")
         h5f.create_dataset('P', data=P, compression="gzip")
         h5f.create_dataset('f', data=f, compression="gzip")

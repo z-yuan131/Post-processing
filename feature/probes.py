@@ -10,9 +10,6 @@ from pyfr.util import subclasses
 from pyfr.shapes import BaseShape
 from pyfr.mpiutil import get_comm_rank_root, mpi
 
-import matplotlib.pyplot as plt
-
-
 class Probes(Base):
     def __init__(self, argv, icfg, fname):
         super().__init__(argv)
@@ -173,10 +170,27 @@ class Probes(Base):
             for t, pt in tpt.items():
                 index = self.time.index(t)
                 soln[index] = np.array(pt)
+
+        # Make it primitive varibles
+        if self.fmt == 'primitive':
+            soln = soln.swapaxes(0,-1)
+            soln = np.array(self._con_to_pri(soln)).swapaxes(0,-1)
         f = h5py.File(f'{self.dir}/probes.s','w')
         f['soln'] = soln
         f['pts'] = np.array(ploc)
         f.close()
+
+    def _con_to_pri(self, cons):
+        rho, E = cons[0], cons[-1]
+
+        # Divide momentum components by rho
+        vs = [rhov/rho for rhov in cons[1:-1]]
+
+        # Compute the pressure
+        gamma = self.cfg.getfloat('constants', 'gamma')
+        p = (gamma - 1)*(E - 0.5*rho*sum(v*v for v in vs))
+
+        return [rho] + vs + [p]
 
     def procinf(self, ptsinfo, lookup):
         # Process information

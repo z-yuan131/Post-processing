@@ -7,7 +7,7 @@ import h5py
 from pyfr.readers.native import NativeReader
 from pyfr.quadrules import get_quadrule
 
-import matplotlib.pyplot as plt
+#import matplotlib.pyplot as plt
 #import matplotlib.tri as tri
 
 """
@@ -34,22 +34,34 @@ class Region(Base):
     def __init__(self, argv, icfg, fname):
         super().__init__(argv)
         self.layers = icfg.getint(fname, 'layers', 0)
-        self.suffix = ['hex'] #icfg.get(fname, 'etype')
-        self.boundary_name = ['wall']#icfg.get(fname, 'bname')
+        #self.suffix = ['hex'] #icfg.get(fname, 'etype')
+        self.suffix = icfg.get(fname, 'etype')
+        self.boundary_name = icfg.get(fname, 'bname', None)
 
-        if self.boundary_name == None:
-            raise RuntimeError('Region has to be attached to a boundary.')
+        #if self.boundary_name == None:
+        #    raise RuntimeError('Region has to be attached to a boundary.')
 
         if self.suffix == None:
-            self.suffix = ['quad','tri','hex','tet','pri','pyr']
+            self.suffix = ['hex'] #['quad','tri','hex','tet','pri','pyr']
+        else:
+            self.suffix = self.suffix[1:-1].split(", ")
+        self.boundary_name = self.boundary_name[1:-1].split(", ")
 
         mesh_part = self.mesh.partition_info('spt')
 
-        self.suffix_parts = np.where(np.array(mesh_part['hex']) > 0)[0]
-        self.suffix_parts = [f'p{i}' for i in self.suffix_parts]
+        # Use strict element type for O grids
+        #self.suffix_parts = np.where(np.array(mesh_part['hex']) > 0)[0]
+        #self.suffix_parts = [f'p{i}' for i in self.suffix_parts]
+        parts = []
+        for etype in self.suffix:
+            parts.append(np.where(np.array(mesh_part[etype]) > 0)[0])
+        parts = set(list(np.concatenate(parts)))
+        self.suffix_parts = [f'p{i}' for i in parts]
+
 
     def get_boundary(self):
         mesh_wall = defaultdict(list)
+        mesh_wall_fid = defaultdict(list)
         mesh_wall_tag = list()
         # Get first level wall mesh
         for key in self.mesh:
@@ -61,6 +73,7 @@ class Region(Base):
                     for etype, eid, fid, pid in self.mesh[key][['f0','f1','f2','f3']].astype('U4,i4,i1,i2'):
                         if etype in self.suffix:
                             mesh_wall[f'spt_{etype}_{part}'].append(eid)
+                            mesh_wall_fid[f'spt_{etype}_{part}'].append(fid)
 
                             # Tag all elements in the set as belonging to the first layer
                             if isinstance(mesh_wall_tag, list):
@@ -70,13 +83,13 @@ class Region(Base):
                             else:
                                 mesh_wall_tag.update({part: {(etype, eid): 0}})
 
-        return mesh_wall_tag, mesh_wall
+        return mesh_wall_tag, mesh_wall, mesh_wall_fid
 
 
 
     def get_wall_O_grid(self):
         # Get O-grid meshes
-        mesh_wall_tag, mesh_wall = self.get_boundary()
+        mesh_wall_tag, mesh_wall, _ = self.get_boundary()
 
         # For single rank process, we'd better to pre load connectivities
         con = defaultdict(list)

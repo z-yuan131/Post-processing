@@ -79,7 +79,7 @@ class Base(object):
         tt = np.linspace(time[0], time[1], Ndt, endpoint=True)
         self.time = list()
         for i in range(len(tt)):
-            self.time.append("{:.2f}".format(tt[i]))
+            self.time.append(f"{time[-1]}".format(tt[i]))
 
     def get_time_series_mpi(self, rank, size):
         time = []
