@@ -36,10 +36,10 @@ class Region(Base):
         self.layers = icfg.getint(fname, 'layers', 0)
         #self.suffix = ['hex'] #icfg.get(fname, 'etype')
         self.suffix = icfg.get(fname, 'etype')
-        self.boundary_name = icfg.get(fname, 'bname')
+        self.boundary_name = icfg.get(fname, 'bname', None)
 
-        if self.boundary_name == None:
-            raise RuntimeError('Region has to be attached to a boundary.')
+        #if self.boundary_name == None:
+        #    raise RuntimeError('Region has to be attached to a boundary.')
 
         if self.suffix == None:
             self.suffix = ['hex'] #['quad','tri','hex','tet','pri','pyr']
@@ -50,8 +50,14 @@ class Region(Base):
         mesh_part = self.mesh.partition_info('spt')
 
         # Use strict element type for O grids
-        self.suffix_parts = np.where(np.array(mesh_part['hex']) > 0)[0]
-        self.suffix_parts = [f'p{i}' for i in self.suffix_parts]
+        #self.suffix_parts = np.where(np.array(mesh_part['hex']) > 0)[0]
+        #self.suffix_parts = [f'p{i}' for i in self.suffix_parts]
+        parts = []
+        for etype in self.suffix:
+            parts.append(np.where(np.array(mesh_part[etype]) > 0)[0])
+        parts = set(list(np.concatenate(parts)))
+        self.suffix_parts = [f'p{i}' for i in parts]
+
 
     def get_boundary(self):
         mesh_wall = defaultdict(list)

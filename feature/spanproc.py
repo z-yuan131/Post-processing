@@ -132,8 +132,12 @@ class SpanBase(Region):
                     index[id] = [self.highorderproc(idx, self.order)
                                                             for idx in item]
                 for t in time:
-                    self.soln_fft(zeleid, mesh_wall, idlist, index,
-                                                        sortid, t, lookup)
+                    if self.method == 'FFT':
+                        self.soln_fft(zeleid, mesh_wall, idlist, index,
+                                                            sortid, t, lookup)
+                    elif self.method == 'AVG':
+                        self.soln_avg(zeleid, mesh_wall, idlist, index,
+                                                            sortid, t, lookup)
 
     def soln_fft(self, zeleid, mesh_wall, idlist, index, sortid, time, lookup):
         ele_type = {'hex': 'quad'}
@@ -144,21 +148,9 @@ class SpanBase(Region):
         #soln = f'/Users/yuanzhenyang/compute/pyfr/Naca0012trip/Re200k/run/mesh.pyfrm'
         soln = self._load_snapshot(soln, mesh_wall, lookup)
 
-        # Get operator
-        #n = self.meshord + 1
-        #mesh_op = self._get_mesh_op('hex', n**3)
-
-        #for id, sln in enumerate(soln):
-        #    soln[id] = np.einsum('ij,jkl -> ikl', mesh_op, sln)
-
-
-
         n = self.order + 1
         soln_fft = np.zeros([n**2,len(self.nfft),self.nvars,len(zeleid)],
                                                         dtype = np.complex_)
-
-        #n = self.order + 1
-        #soln_fft = np.zeros([n**2,self.nfft,self.ndims,len(zeleid)])
 
         for id, item in zeleid.items():
             for idx, (key, eid) in enumerate(item):
@@ -177,14 +169,51 @@ class SpanBase(Region):
             sln = self.comfb_fft(sln, n, sortid[id])
             soln_fft[...,id] = sln
 
-        self._flash_to_disk(soln_fft, time)
+        self._flash_to_disk(soln_fft, time, 'Imag')
 
-    def _flash_to_disk(self, array, t):
+    def soln_avg(self, zeleid, mesh_wall, idlist, index, sortid, time, lookup):
+        ele_type = {'hex': 'quad'}
+        soln_pts = {'quad': 'gauss-legendre'}
+
+        # Solution average
+        soln = f'{self.solndir}{time}.pyfrs'
+        #soln = f'/Users/yuanzhenyang/compute/pyfr/Naca0012trip/Re200k/run/mesh.pyfrm'
+        soln = self._load_snapshot(soln, mesh_wall, lookup)
+
+
+        n = self.order + 1
+        soln_avg = np.zeros([n**2,self.nvars,len(zeleid)])
+
+        for id, item in zeleid.items():
+            for idx, (key, eid) in enumerate(item):
+                if idx == 0:
+                    sln = soln[key][:,eid]
+                else:
+                    sln = np.append(sln, soln[key][:,eid], axis = 1)
+
+            if id in idlist:
+                idx = index[id]
+                for k, v in enumerate(idlist[id]):
+                    mt = sln[:,v]
+                    sln[:,v] = mt[idx[k]]
+
+            # Elimate common surface boundary
+            sln = sln.reshape(n**2, -1, nvars, order= 'F')
+            sln = np.mean(sln[:,sortid[id]], axis = 1)
+            soln_avg[...,id] = sln
+
+        self._flash_to_disk(soln_avg, time, 'Real')
+
+    def _flash_to_disk(self, array, t, dtype):
         """Possibly there're much efficient ways to save complex numbers."""
-        f = h5py.File(f'{self.dir}/spanavg_fft_{t}.s', 'w')
         #f.create_dataset('soln', array, dtype='complex')
-        f['soln_real'] = array.real
-        f['soln_imag'] = array.imag
+        if dtype == 'Real':
+            f = h5py.File(f'{self.dir}/spanavg_avg_{t}.s', 'w')
+            f['soln'] = array
+        else:
+            f = h5py.File(f'{self.dir}/spanavg_fft_{t}.s', 'w')
+            f['soln_real'] = array.real
+            f['soln_imag'] = array.imag
         f.close()
 
 
@@ -205,8 +234,8 @@ class SpanBase(Region):
             else:
                 soln[:,j] = sln[:,i]
                 j += 1
-        print(soln.shape)
-        return np.fft.fft(soln, axis = 1)[:,self.nfft]
+        #print(soln.shape)
+        return np.fft.fft(soln, axis = 1)[:,self.nfft] / soln.shape[1]
 
 
     def loadcahcedfile(self):

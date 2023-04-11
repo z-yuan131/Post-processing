@@ -99,14 +99,15 @@ class Gradient(Region):
             f.close()
 
 
-    def _load_snapshot(self, name, mesh_wall, soln_op):
+    def _load_snapshot(self, name, mesh_wall, soln_op = []):
         soln = defaultdict()
         f = h5py.File(name,'r')
         for k in mesh_wall:
             _, etype, part = k.split('_')
             name = f'{self.dataprefix}_{etype}_{part}'
             sln = np.array(f[name])[...,mesh_wall[k]]
-            sln = np.einsum('ij, jkl -> ikl',soln_op[etype],sln)
+            if len(soln_op) > 0:
+                sln = np.einsum('ij, jkl -> ikl',soln_op[etype],sln)
             sln = self._pre_proc_fields_soln(sln.swapaxes(0,1)).swapaxes(0,1)
             try:
                 soln[etype] = np.append(soln[etype], sln, axis = -1)
