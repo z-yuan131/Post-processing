@@ -5,6 +5,7 @@ import h5py
 import matplotlib.pyplot as plt
 import matplotlib.tri as tri
 from matplotlib import ticker
+from matplotlib import colors
 from scipy.signal import welch, get_window
 
 
@@ -26,8 +27,11 @@ class BL_base(Base):
         super().__init__(argv)
         self.AoA = icfg.getfloat(fname, 'AoA', 0)
         self._trip_loc = icfg.getfloat(fname, 'trip-loc', None)
+        self.fmt = icfg.get(fname, 'format', 'primitive')
         self.tol = 1e-5
         self.etype = ['hex']
+
+        self.L = 100
 
         print(self._constants)
         self._rho = rho = self._constants['rhoInf']
@@ -198,20 +202,21 @@ class BL_base(Base):
 
         return mu*(gradu + gradu.swapaxes(0, 1) - 2/3*bulk)
 
-    def _reorder_pts(self, mesh):
-        mesh = mesh.reshape(-1, self.ndims)
-        #r = np.linalg.norm(mesh[:,:2], axis = 1)
-        index = np.where(abs(mesh[:,-1] - np.min(mesh[:,-1])) < self.tol)[0]
-        msh = self._duplpts_pd(mesh[index])
-        #index = np.argsort(msh[:,0])
-        #rr = np.linalg.norm(msh[index,:2], axis = 1)
-        #rr = np.linalg.norm(msh[:,:2], axis = 1)
-        index = []
-        for i in msh[:,:2]:
-            index1 = np.where(np.linalg.norm(i - mesh[:,:2], axis = 1) < 3e-4)[0]
-            index2 = np.argsort(mesh[index1,-1])
-            index.append(index1[index2])
-        return index
+    def _reorder_pts(self, mesh, soln):
+        #msh = self._duplpts_pd(mesh, ['x','y'])
+        index = np.where(abs(mesh[:,-1] - np.max(mesh[:,-1])) < 1e-5)
+        msh = mesh[index]
+
+        omesh, osoln = [], []
+        for pt in msh:
+            index = np.where(np.linalg.norm(pt[:2] - mesh[:,:2], axis = 1) < 1e-3)[0]
+            #index2 = np.argsort(mesh[index1,-1])
+            #index = index1[index2]
+            #print(len(index))
+            if len(index) > 30:
+                omesh.append(np.mean(mesh[index], axis = 0))
+                osoln.append(np.mean(soln[index], axis = 0))
+        return np.array(omesh), np.array(osoln)
 
     def _get_rid_of_dp_pts_cf(self, mesh, soln, index = []):
         mn, sn = [], []
@@ -229,6 +234,18 @@ class BL_base(Base):
         sln = np.stack(sn)
         return msh, sln
 
+    def _con_to_pri(self, cons):
+        rho, E = cons[0], cons[-1]
+
+        # Divide momentum components by rho
+        vs = [rhov/rho for rhov in cons[1:-1]]
+
+        # Compute the pressure
+        gamma = self.cfg.getfloat('constants', 'gamma')
+        p = (gamma - 1)*(E - 0.5*rho*sum(v*v for v in vs))
+
+        return [rho] + vs + [p]
+
 
 class BL(BL_base):
     def __init__(self, argv, icfg, fname):
@@ -236,26 +253,42 @@ class BL(BL_base):
 
 
     def _load_mesh_soln(self):
-        f = h5py.File(f'{self.dir}/spanavg_time_avg.s','r')
-        for i in f:
-            print(i)
+        f = h5py.File(f'{self.dir}/spanavg_mean.s','r')
         mesh = np.array(f['mesh'])
-        soln = np.array(f['soln_real']) + 1j*np.array(f['soln_imag'])
+        soln = np.array(f['soln'])
         f.close()
 
-        # Rotate mesh to zero AoA and return
-        return mesh @ self.rot_map(), abs(soln) / 409   # 409 is N points in span direction
+        """ Limit the region for plotting and calculation """
+        index = np.where(mesh[:,0] < 105)
+        mesh, soln = mesh[index], soln[index]
+        """ END """
+
+        print(self.fmt)
+        if self.fmt != 'primitive':
+            soln = np.array(self._con_to_pri(soln.T)).T
+
+        return mesh @ self.rot_map(), soln
+
 
     def main_proc(self):
         # Create new mesh which is orthogonal to wall mesh
         mesh_wall = self._load_preproc_wall_mesh()
         # Load original mesh and soln
         mesh, soln = self._load_mesh_soln()
+
+        print(mesh.shape, soln.shape, self._trip_loc)
+
+
+
+        #raise RuntimeError
+        """ Runtime cp-cf first to get tau"""
+
         meshw, vecm = self._ortho_mesh(mesh_wall)
 
         xmesh = []
         # Get location of profiles are plotted
-        xloc = [0.45, 0.54, 0.62, 0.75, 0.85, 0.94]
+        #xloc = [0.62, 0.75, 0.85, 0.94]
+        xloc = np.linspace(0.05, 0.99, 100)
         for x in xloc:
             idx0 = np.where(meshw[:,0,1] > 0)[0]
             idx1 = np.where(meshw[:,0,0] > x*np.max(meshw[:,0,0]))[0][:1]
@@ -267,7 +300,10 @@ class BL(BL_base):
         xsoln = self._interpolation(mesh, soln, xmesh)
         solnw = self._interpolation(mesh, soln, meshw)
         self._sample_location(meshw, solnw, xmesh, xsoln)
-        self._plot_session_bl_profile(xmesh, xsoln, xloc)
+        bledge = self._plot_session_bl_profile(xmesh, xsoln, xloc)
+
+        # Plot field varibles
+        self._plot_session_field(mesh, soln, mesh_wall, bledge)
 
         """
         # Split the region at the tripping location
@@ -284,6 +320,67 @@ class BL(BL_base):
         """
 
         #self._plot_session(info)
+
+    def _plot_session_field(self, mesh, soln, meshw, bledge):
+        # Bad points on the wall
+        index = [np.argsort(np.linalg.norm(mesh[:,:2] - msh[:2] , axis = 1))[0] for msh in meshw]
+
+        # Seperation bubble
+        """
+        v = np.linalg.norm(soln[:,[1,2]], axis = 1)
+        idx = np.where(v < 1e-3)
+        mesh_bubble = mesh[idx]
+
+        sln_amp = np.linalg.norm(soln[:,[1,2,3]], axis = 1)
+        soln = np.append(soln, sln_amp[:,None], axis = 1)
+        """
+        varname = ['rho','u','v','w','p']
+        for i in [0,1,2,4]:
+            var = soln[:,i]
+            levels = np.linspace(np.min(var),np.max(var),40)
+
+            # Wall points
+            var[index] = np.NaN
+
+            plt.figure(figsize=(20,5))
+            if self._trip_loc:
+                for j in range(2):
+                    sln = var.copy()
+                    if j == 0:
+                        idx = np.where(mesh[:,0] > self._trip_loc)[0]
+                    else:
+                        idx = np.where(mesh[:,0] < self._trip_loc)[0]
+                    sln[idx] = np.NaN
+
+                    sln = np.ma.masked_invalid(sln)
+                    sln = sln.filled(fill_value=-999)
+
+                    triangle = tri.Triangulation(mesh[:,0],mesh[:,1])
+                    plt.tricontourf(triangle, sln.real, levels ,cmap = 'coolwarm') # coldwarm jets
+
+
+                    #plt.tricontour(triangle, soln[:,-1], levels=[0.0],cmap = 'Reds',linestyles='dashed')
+            else:
+                sln = var.copy()
+                sln = np.ma.masked_invalid(sln)
+                sln = sln.filled(fill_value=-999)
+                triangle = tri.Triangulation(mesh[:,0],mesh[:,1])
+                plt.tricontourf(triangle, sln.real, levels ,cmap = 'coolwarm') # coldwarm jets
+
+            cbar = plt.colorbar()
+
+            # Plot boundary layer edge
+            if self._trip_loc:
+                idx = np.where(bledge[:,0] > self._trip_loc)[0]
+                plt.plot(bledge[idx,0],bledge[idx,1],'r--')
+                idx = np.where(bledge[:,0] < self._trip_loc)[0]
+                plt.plot(bledge[idx,0],bledge[idx,1],'r--')
+            else:
+                plt.plot(bledge[idx,0],bledge[idx,1],'r--')
+
+            plt.savefig(f'{self.dir}/figs/{varname[i]}_meanflow.eps')
+        plt.show()
+
 
     def _sample_location(self, mesh, soln, xmesh, xsoln):
         mesh, xmesh = mesh/100, xmesh/100
@@ -316,39 +413,91 @@ class BL(BL_base):
             plt.plot(xmesh[i,index,0],xmesh[i,index,1],'r--')
         plt.xlabel('x/c')
         plt.ylabel('y/c')
+        plt.show()
 
 
     def _get_stress_tensor(self, msh):
-        # A strict rule about element type here
-        f = h5py.File(f'{self.dir}/grad.m','r')
-        mesh = np.array(f['hex']) @ self.rot_map()
-        f.close()
+        # Load stress tensor from surface stress calculation
+        try:
+            f = h5py.File(f'{self.dir}/tau.s','r')
+            mesh = np.array(f['mesh'])
+            tau = np.array(f['tau'])
+            f.close()
+        except:
+            raise RuntimeError('Run cp cf alogrithm first and copy tau to this directory')
 
-        f = h5py.File(f'{self.dir}/grad_avg.s', 'r')
-        soln = np.array(f['hex'])
-        f.close()
+        #tau = np.sum(tau.reshape(9,-1, order = 'F'), axis = 0)
+        tau = tau[0,1]
 
-        # Reorder points
-        index = self._reorder_pts(mesh)
-        mesh, soln = self._get_rid_of_dp_pts_cf(mesh, soln, index)
-
-        tau = []
-        for pt in msh:
-            index = np.argsort(np.linalg.norm(mesh[:,:2] - pt , axis = 1))[:2]
-
-            sln = np.mean(soln[index], axis = 0)
-
-            # Calculate stress
-            du = sln[self.nvars:]
-            u = sln[:self.nvars]
-            tau.append(self.stress_tensor(du, u))
-
-        return np.stack(tau)
-
-
-
+        # Do interpolation
+        return np.interp(msh[:,0], mesh[:,0], tau)
 
     def _plot_session_bl_profile(self, mesh, soln, xloc):
+        npts, nlayers, nvars = soln.shape
+        vtot = np.linalg.norm(soln[...,1:self.ndims], axis = -1)
+        rho = soln[...,0]
+        y = np.linalg.norm(mesh[...,:2] - mesh[:,0,:2][:,None], axis = -1)
+
+
+        """
+        tau = self._get_stress_tensor(mesh[:,0,:2])
+
+        # Wall units
+        plt.figure()
+        for i in range(npts):
+            # Drop nan due to interpolation
+            index = np.where(np.isnan(vtot[i]) == False)[0]
+            ut = np.sqrt(tau[i]/rho[i,index])
+            nu = self._constants['mu']/rho[i,index]
+            delta_nu = nu/ut
+            yplus = y[i,index]/delta_nu
+            uplus = vtot[i,index]/ut
+            plt.plot(yplus, uplus, label = f'x/c = {xloc[i]}')
+
+        # Log law
+        kappa, B = 0.41, 5.2
+        index = np.where(yplus > 5)[0]
+        plt.plot(yplus[index], (1/kappa)*np.log(yplus[index]) + B, '--', label = 'Log law')
+        # Linear law
+        index = np.where(yplus < 10)[0]
+        plt.plot(yplus[index],yplus[index],'.-',label = 'Linear law')
+
+        plt.legend()
+        plt.xscale('log')
+        plt.xlabel('$y^+$')
+        plt.ylabel('$u^+$')
+        plt.show()
+        """
+
+        # Mean profile scaled in outer units
+        idx = []
+        plt.figure()
+        for i in range(npts):
+            # Drop nan due to interpolation
+            index = np.where(np.isnan(vtot[i]) == False)[0]
+
+            deltas = np.trapz(1 - rho[i,index]*vtot[i,index]/(rho[i,index[-1]]*vtot[i,index[-1]]), y[i, index])
+            plt.plot(vtot[i,index]/vtot[i,index[-5]], y[i,index]/deltas,label = f'x/c = {xloc[i]}')
+
+            # Get boundary layer edge position
+            vedge = vtot[i,index[-5]]
+            for j in range(len(y[i])-3):
+                if vtot[i,j] > 0.99*vedge:
+                    idx.append(mesh[i,j])
+                    break
+        #plt.legend()
+        #plt.xlabel('$\lVert u/U_{\infty} \rVert$')
+        plt.xlabel('$||u/U_e||$')
+        plt.ylabel('$y/\delta^*$')
+        plt.ylim([0,8])
+        plt.savefig(f'{self.dir}/figs/velocity_profile.eps')
+        plt.show()
+
+        return np.array(idx)
+
+
+
+    def _plot_session_bl_profile_berlin(self, mesh, soln, xloc):
         npts, nlayers, nvars = soln.shape
         vtot = np.linalg.norm(soln[...,1:self.ndims], axis = -1)
         rho = soln[...,0]
@@ -441,6 +590,21 @@ class BL(BL_base):
         #plt.xlabel('$\lVert u/U_{\infty} \rVert$')
         plt.xlabel('$||u/U_e||$')
         plt.ylabel('$y/c$')
+
+
+        plt.figure()
+        # Y is corrected by density
+        i = -1
+        index = np.where(np.isnan(vtot[i]) == False)[0]
+
+        Y = [np.trapz(rho[i,index[:id]] / rho[i,index[-1]],y[i,index[:id]]/100) for id in range(1,len(index))]
+        Y = np.array([0] + Y)
+        plt.plot(vtot[i,index]/vtot[i,index[-1]], Y,label = f'LES')
+        plt.plot(mat['uBL'][1:]/mat['uBL'][-1], mat['dist2wall'][1:]/100 + 0.005,'.', label = 'Exp')
+        plt.legend()
+        #plt.xlabel('$\lVert u/U_{\infty} \rVert$')
+        plt.xlabel('$||u/U_e||$')
+        plt.ylabel('$\eta$')
         plt.show()
 
 
@@ -578,13 +742,13 @@ class BL_Coeff(BL_base):
 
     def _load_mesh_soln(self):
         # A strict rule about element type here
-        f = h5py.File(f'{self.dir}/grad.m','r')
-        mesh = np.array(f['hex'])
+        f = h5py.File(f'{self.dir}/grad_mean.s','r')
+        mesh = np.array(f['mesh'])
+        soln = np.array(f['soln'])
         f.close()
 
-        f = h5py.File(f'{self.dir}/grad_avg.s', 'r')
-        soln = np.array(f['hex'])
-        f.close()
+        mesh = mesh /self.L
+        self._trip_loc = self._trip_loc / self.L
 
         return mesh @ self.rot_map(), soln
 
@@ -594,13 +758,23 @@ class BL_Coeff(BL_base):
         print(mesh.shape, soln.shape)
 
         # Reorder points
-        index = self._reorder_pts(mesh)
-        mesh, soln = self._get_rid_of_dp_pts_cf(mesh, soln, index)
-        print(mesh.shape, soln.shape)
-        plt.plot(mesh[:,0],mesh[:,1],'.')
+        mesh, soln = self._reorder_pts(mesh, soln)
+        #mesh, soln = self._get_rid_of_dp_pts_cf(mesh, soln, index)
+        #print(mesh.shape, soln.shape)
+        """
+        index = np.where(abs(mesh[:,-1] + 9) > 0.1)[0]
+        idx = [*range(len(mesh))]
+        idx = [id for id in idx if id not in index]
+        plt.figure()
+        #plt.plot(mesh[:,0],mesh[:,1],'.')
+        #plt.plot(mesh[index,0],mesh[index,1],'.')
+        plt.plot(mesh[idx,0],mesh[idx,1],'.')
         plt.show()
+        raise RuntimeError
+        """
 
         cp, cf, mp = defaultdict(list), defaultdict(list), defaultdict(list)
+        tau = defaultdict(list)
         for i in range(2):
             # seperate the upper and lower side
             if i == 0:
@@ -610,37 +784,39 @@ class BL_Coeff(BL_base):
             msh = mesh[index]
             sln = soln[index]
 
+            # Sort along x-axis
             index = np.argsort(msh[:,0])
-            msh = msh[index]
-            sln = sln[index]
+            msh, sln = msh[index], sln[index]
 
             # Splite the region before and after the tripping location
             mm, sm = [], []
             if self._trip_loc:
                 index = np.where(msh[:,0] > self._trip_loc)[0]
-                print(index, msh.shape)
                 mm.append(msh[0:index[0]])
                 mm.append(msh[index[0]:])
                 sm.append(sln[0:index[0]])
                 sm.append(sln[index[0]:])
             else:
-                mm.append(msh[index])
-                sm.append(sln[index])
+                mm.append(msh)
+                sm.append(sln)
 
 
             for msh, sln in zip(mm, sm):
+                if len(msh) == 0:
+                    continue
                 if i == 0:
-                    side = -1
-                else:
                     side = 1
-                _msh, _cp, _cf = self.cal_cp_cf(msh, sln, side)
+                else:
+                    side = -1
+                _msh, _cp, _cf, _tau = self.cal_cp_cf(msh, sln, side)
                 cp[i].append(_cp)
                 cf[i].append(_cf)
+                tau[i].append(_tau)
                 mp[i].append(_msh)
 
-        self._plot_session(mp, cp, cf)
+        self._plot_session(mp, cp, cf, tau)
 
-    def _plot_session(self, mesh, cp, cf):
+    def _plot_session(self, mesh, cp, cf, tau):
         # Line plots Cp
         plt.figure()
         for k, v in cp.items():
@@ -648,62 +824,75 @@ class BL_Coeff(BL_base):
                 if k == 0:
                     plt.plot(msh[:,0],_cp,'r')
                 else:
-                    plt.plot(msh[:,0],_cp,'k')
+                    plt.plot(msh[:,0],_cp,'k-.')
+        plt.xlabel('$x/c$')
+        plt.ylabel('$-C_p$')
+        plt.savefig(f'{self.dir}/figs/cp.eps')
         plt.figure()
         for k, v in cf.items():
             for msh, _cf in zip(mesh[k],v):
                 if k == 0:
                     plt.plot(msh[:,0],_cf,'r')
                 else:
-                    plt.plot(msh[:,0],_cf,'k')
+                    plt.plot(msh[:,0],_cf,'k-.')
+            plt.axhline(y = 0.0, color = 'b', linestyle = '--')
+        plt.xlabel('$x/c$')
+        plt.ylabel('$C_f$')
+        plt.savefig(f'{self.dir}/figs/cf.eps')
         plt.show()
 
-        f = h5py.File('cp_cf.s','w')
-        for k, v in cp.items():
-            ccp = []
-            for msh, _cp in zip(mesh[k],v):
-                if ccp == []:
-                    ccp = _cp
+        #"""
+        f = h5py.File(f'{self.dir}/tau.s','w')
+        for k, v in tau.items():
+            tt = []
+            for msh, _tau in zip(mesh[k],v):
+                if tt == []:
+                    tt = _tau
                     mmsh = msh
                 else:
-                    ccp = np.append(ccp, _cp)
+                    tt = np.append(tt, _tau, axis = -1)
                     mmsh = np.append(mmsh, msh, axis = 0)
-            f[f'cp_{k}'] = ccp
-            f[f'mesh_{k}'] = mmsh
-        for k, v in cf.items():
-            ccf = []
-            for msh, _cf in zip(mesh[k],v):
-                if ccf == []:
-                    ccf = _cf
-                else:
-                    ccf = np.append(ccf, _cf)
-            f[f'cf_{k}'] = ccf
+            f[f'tau'] = tt
+            f[f'mesh'] = mmsh
+            break
         f.close()
+        #"""
 
     def cal_cp_cf(self, mesh, soln, side):
+        mesh[:,-1] = 0
+
         # Get normal direction
         vect = mesh[1:] - mesh[:-1]
         vect = np.append(vect, vect[-1][None,:], axis = 0)
+
+        # Be sure that no duplicated points
+        index = np.where(np.linalg.norm(vect, axis=1) > 1e-10)[0]
+        mesh, soln, vect = mesh[index], soln[index], vect[index]
+
         # Reshape vectors
         npts, nvars = soln.shape
 
         # Normalise tangential vector
         vect = vect/np.linalg.norm(vect, axis = -1)[:,None]
         # Calculate normal vector
-        vecn = np.cross(vect,np.array([0,0,side]))
+        vecn = np.cross(vect,np.array([0,0,1]))
+
         # Calculate stress
         du = soln.T[self.nvars:]
         u = soln.T[:self.nvars]
         tau = self.stress_tensor(du, u)
 
         # Calculate cf
-        cf = np.einsum('ij, jki -> i', vecn, tau)/self._dyna_p
+        cf = np.einsum('ik, jki -> jki', vecn, tau)/self._dyna_p
+        cf = tau/self._dyna_p
+        # Get wall friction coefficient
+        cf = cf[1,0] * side
 
         # Calculate cp
         cp = (u[-1] - self._pinf)/self._dyna_p
 
         # Reshape
-        return mesh.reshape(npts, self.ndims), cp, cf
+        return mesh.reshape(npts, self.ndims), cp, cf, tau
 
 
     def _duplpts_pd(self, mesh, subset):
@@ -720,13 +909,15 @@ class BL_Coeff_hotmap(BL_base):
 
     def _load_mesh_soln(self):
         # A strict rule about element type here
-        f = h5py.File(f'{self.dir}/grad.m','r')
-        mesh = np.array(f['hex'])
+        f = h5py.File(f'{self.dir}/grad_mean.s','r')
+        #f = h5py.File(f'{self.dir}/grad_timesereis2.s','r')
+        mesh = np.array(f['mesh'])
+        soln = np.array(f['soln'])
+        #soln = np.array(f['soln'])[100]
         f.close()
 
-        f = h5py.File(f'{self.dir}/grad_avg.s', 'r')
-        soln = np.array(f['hex'])
-        f.close()
+        mesh = mesh /self.L
+        self._trip_loc = self._trip_loc / self.L
 
         return mesh @ self.rot_map(), soln
 
@@ -735,42 +926,36 @@ class BL_Coeff_hotmap(BL_base):
         mesh, soln = self._load_mesh_soln()
         print(mesh.shape, soln.shape)
 
-        # Reorder points
-        index = self._reorder_pts(mesh)
-        mesh, soln = self._get_rid_of_dp_pts_cf(mesh, soln, index)
+        # Make sure NACA0012 part of aerofoil is used
+        index = np.where(mesh[:,0] < 0.98)[0]
+        mesh, soln = mesh[index], soln[index]
 
-        for msh0 in mesh:
-            print(msh0.shape)
-            plt.plot(msh0[:,0],msh0[:,1],'.')
-        #plt.show()
+        mp, cp, cf = defaultdict(list), defaultdict(list), defaultdict(list)
+        for i in range(2):
+            if i == 0:
+                index = np.where(mesh[:,1] > 0)[0]
+                msh, sln = mesh[index], soln[index]
+            else:
+                index = np.where(mesh[:,1] > 0)[0]
+                msh, sln = mesh[index], soln[index]
 
-        # Splite the region before and after the tripping location
-        mm, sm = [], []
-        if self._trip_loc:
-            for id, _msh in enumerate(mesh):
-                if _msh[0,0] > self._trip_loc:
-                    mm.append(np.stack(mesh[:id]))
-                    sm.append(np.stack(soln[:id]))
-                    mm.append(np.stack(mesh[id:]))
-                    sm.append(np.stack(soln[id:]))
-                    break
-        else:
-            mm.append(np.stack(mesh))
-            sm.append(np.stack(soln))
+            # sort along x-axis
+            index = np.argsort(msh[:,0])
+            msh, sln = msh[index], sln[index]
 
-        cp, cf, mp = defaultdict(list), defaultdict(list), defaultdict(list)
-        for mesh, soln in zip(mm, sm):
-            print(mesh.shape, soln.shape)
-            raise RuntimeError
-            for i in range(2):
-                # seperate the upper and lower side
-                if i == 0:
-                    index = np.where(mesh[:,:,1] > 0)[0]
-                else:
-                    index = np.where(mesh[:,:,1] < 0)[0]
-                msh = msh[:, index]
-                sln = sln[:, index]
+            # Splite the region before and after the tripping location
+            mm, sm = [], []
+            if self._trip_loc:
+                index = np.where(msh[:,0] > self._trip_loc)[0]
+                mm.append(msh[0:index[0]])
+                mm.append(msh[index[0]:])
+                sm.append(sln[0:index[0]])
+                sm.append(sln[index[0]:])
+            else:
+                mm.append(msh)
+                sm.append(sln)
 
+            for msh, sln in zip(mm, sm):
                 if i == 0:
                     side = -1
                 else:
@@ -783,61 +968,86 @@ class BL_Coeff_hotmap(BL_base):
         self._plot_session(mp, cp, cf)
 
     def _plot_session(self, mesh, cp, cf):
-        # Line plots Cp
-        plt.figure()
-        for k, v in cp.items():
-            for msh, _cp in zip(mesh[k],v):
-                m = np.mean(msh, axis = 1)
-                v = np.mean(_cp, axis = 1)
-                plt.plot(m[:,0],v)
-        plt.show()
+        # Contour plot skin friction field
+        side = ['upper','lower']
+        for i in cf:
+            # get levels
+            abound = []
+            for mm, _cf in zip(mesh[i], cf[i]):
+                abound += [np.min(_cf),np.max(_cf)]
+            levels = np.linspace(np.min(abound),np.max(abound),10)
+
+            plt.figure(figsize=(18,5))
+            for mm, _cf in zip(mesh[i], cf[i]):
+                levels = np.linspace(np.min(_cf),np.max(_cf),50)
+
+                print(mm.shape, _cf.shape)
+                triangle = tri.Triangulation(mm[:,0],mm[:,-1])
+                divnorm=colors.TwoSlopeNorm(vmin=np.min(levels), vcenter=0., vmax=np.max(levels))
+                plt.tricontourf(triangle, _cf,levels,cmap = 'coolwarm', norm=divnorm) # coldwarm jets
+
+            #plt.ylim([0.55,1])
+            plt.xlabel('$x/c$')
+            plt.ylabel('$z/c$')
+
+            cbar = plt.colorbar()
+            plt.gca().invert_yaxis()
+            plt.savefig(f'{self.dir}/figs/cf_hotmap_{side[i]}.eps')
+            #plt.tight_layout()
+            plt.show()
+
+
+
+
+    def NACA0012_norm_dir(self, mesh, soln):
+        #y= +- 0.6*[0.2969*sqrt(x) - 0.1260*x - 0.3516*x2 + 0.2843*x3 - 0.1015*x4]
+        dx = np.min([0.01, np.max(mesh[:,0]/1000)])
+        if any(mesh[:,1] > 0):
+            y = lambda x: 0.6*(0.2969*x**(0.5) - 0.1260*x - 0.3516*x**2 + 0.2843*x**3 - 0.1015*x**4)
+            dy = y(mesh[:,0] + dx) - y(mesh[:,0])
+            vect = np.zeros([3,len(dy)])
+            vect[0], vect[1], vect[2] = dx, dy, 0
+
+            #index = np.where(np.linalg.norm(vect, axis = 1) > 1e-10)[0]
+            #mesh, soln, vect = mesh[index], soln[index], vect[:,index]
+            vect = vect / np.linalg.norm(vect, axis = 0)[None]
+
+            # Calculate normal vector
+            vecn = np.cross(vect.T,np.array([0,0,-1]))
+
+        else:
+            y = lambda x: -0.6*(0.2969*x**(0.5) - 0.1260*x - 0.3516*x**2 + 0.2843*x**3 - 0.1015*x**4)
+            dy = y(mesh[:,0] + dx) - y(mesh[:,0])
+            vect = np.zeros([3,len(dy)])
+            vect[0], vect[1], vect[2] = dx, dy, 0
+
+            #index = np.where(np.linalg.norm(vect, axis = 1) > 1e-10)[0]
+            #mesh, soln, vect = mesh[index], soln[index], vect[:,index]
+
+            vect = vect / np.linalg.norm(vect, axis = 0)[None]
+            # Calculate normal vector
+            vecn = np.cross(vect.T,np.array([0,0,1]))
+
+        return vecn
+
+
 
     def cal_cp_cf(self, mesh, soln, side):
-        # Get normal direction
-        vect = mesh[1:] - mesh[:-1]
-        vect = np.append(vect, vect[-1][None,:,:], axis = 0)
-        # Reshape vectors
-        npts, neles, nvars = soln.shape
-        soln = soln.reshape(-1, nvars)
-        mesh = mesh.reshape(-1, self.ndims)
-        vect = vect.reshape(-1, self.ndims)
+        # Get normal direction from NACA0012 profile
+        vecn =  self.NACA0012_norm_dir(mesh, soln)
 
-        # Normalise tangential vector
-        vect = vect/np.linalg.norm(vect, axis = -1)[:,None]
-        # Calculate normal vector
-        vecn = np.cross(vect,np.array([0,0,side]))
         # Calculate stress
         du = soln.T[self.nvars:]
         u = soln.T[:self.nvars]
         tau = self.stress_tensor(du, u)
 
         # Calculate cf
-        cf = np.einsum('ij, jki -> i', vecn, tau)/self._dyna_p
+        cf = np.einsum('ij, jki -> jki', vecn, tau)/self._dyna_p
 
         # Calculate cp
         cp = (u[-1] - self._pinf)/self._dyna_p
 
-        # Reshape
-        cp = cp.reshape(npts, neles)
-        cf = cf.reshape(npts, neles)
-
-        return mesh.reshape(npts, neles, self.ndims), cp, cf
-
-    def _reorder_pts(self, mesh):
-        mesh = mesh.reshape(-1, self.ndims)
-        #r = np.linalg.norm(mesh[:,:2], axis = 1)
-        index = np.where(abs(mesh[:,-1] - np.min(mesh[:,-1])) < self.tol)[0]
-        msh = self._duplpts_pd(mesh[index], ['x','y'])
-        #index = np.argsort(msh[:,0])
-        #rr = np.linalg.norm(msh[index,:2], axis = 1)
-        #rr = np.linalg.norm(msh[:,:2], axis = 1)
-        index = []
-        for i in msh[:,:2]:
-            index1 = np.where(np.linalg.norm(i - mesh[:,:2], axis = 1) < 3e-4)[0]
-            index2 = np.argsort(mesh[index1,-1])
-            index.append(index1[index2])
-            print(len(index1))
-        return index
+        return mesh, cp, cf[1,0]
 
     def _get_rid_of_dp_pts_cf(self, mesh, soln, index = []):
         mn, sn = [], []
