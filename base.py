@@ -96,14 +96,9 @@ class Base(object):
         mesh_op = self._get_mesh_op_vis(etype, nspts, svpts)
         return mesh_op
 
-
     def _get_ops_interp(self, nspts, etype, upts, nupts, order):
-
         svpts = self._get_std_ele(etype, nspts, order)
-        mesh_op = self._get_mesh_op_vis(etype, nspts, svpts)
-
-        # Convert vis points to solution pts
-        mesh_op = self._get_mesh_op_sln(etype, nupts, upts) @ mesh_op
+        mesh_op = self._get_mesh_op_gll(etype, nspts, upts)
         return mesh_op
 
     def _get_vis_op(self, nspts, etype, order):
@@ -122,6 +117,14 @@ class Base(object):
         shape = self._get_shape(name, nspts, self.cfg)
         return shape.sbasis.nodal_basis_at(svpts).astype(self.dtype)
 
+    def _get_mesh_op_gll(self, name, nspts, gllpts):
+        shape = self._get_shape(name, nspts, self.cfg)
+        return shape.sbasis.nodal_basis_at(gllpts).astype(self.dtype)
+
+    def _get_mesh_op_qr(self, name, nspts, qrpts):
+        shape = self._get_shape(name, nspts, self.cfg)
+        return shape.sbasis.nodal_basis_at(qrpts).astype(self.dtype)
+
     def _get_mesh_op_sln(self, name, nspts, upts):
         shape = self._get_shape(name, nspts, self.cfg)
         return shape.sbasis.nodal_basis_at(upts).astype(self.dtype)
@@ -134,7 +137,8 @@ class Base(object):
 
     def _get_soln_op(self, name, nspts):
         shape = self._get_shape(name, nspts, self.cfg)
-        return shape.sbasis.nodal_basis_at(shape.upts).astype(self.dtype)
+        svpts = self._get_std_ele(name, nspts, self.order)
+        return shape.ubasis.nodal_basis_at(svpts).astype(self.dtype)
 
     def _get_mesh_order(self):
         for key in self.mesh_inf:

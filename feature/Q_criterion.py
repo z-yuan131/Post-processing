@@ -416,13 +416,21 @@ class Q_criterion(Gradient):
                 mesh[etype] = msh
         return mesh
 
+    def rot_map(self):
+        self.AoA = 3
+        from math import pi
+        rot_map = np.array([[np.cos(self.AoA/180*pi),np.sin(self.AoA/180*pi),0],
+                [-np.sin(self.AoA/180*pi), np.cos(self.AoA/180*pi), 0],
+                [0,0,1]])
+        return rot_map[:self.ndims,:self.ndims]
+
     def _restrict_domain(self, ele_wall):
         ele_new = {}
         for key, eles in ele_wall.items():
             mesh = self.mesh[key][:,eles]
-            cmesh = np.mean(mesh, axis = 0)
+            cmesh = np.mean(mesh, axis = 0) @ self.rot_map()
             idx0 = np.where(cmesh[:,1] > 0)[0]
-            idx1 = np.where(cmesh[idx0,0] > 50)[0]
+            idx1 = np.where(cmesh[idx0,0] > 5)[0]
 
             if len(idx1) > 0:
                 ele_new[key] = [eles[idx] for idx in idx0[idx1]]

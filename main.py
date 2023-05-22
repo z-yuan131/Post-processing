@@ -9,14 +9,14 @@ from feature.region import Region
 #from feature.spanproc import SpanBase
 from feature.spanavg import SpanavgBase
 
-#from feature.probes import Probes
-#from feature.probes_bounding_box import Probes
+from feature.probes import Probes
+#from feature.probes_bounding_box_4.17 import Probes
 #from feature.probes_bounding_box_ele import Probes
 #from feature.probes_modified import Probes
-from feature.probes_cloest import Probes
+#from feature.probes_cloest import Probes
 
 from feature.grad import Gradient
-from feature.gatherup import GU2, GU_timeseries_slice2d, GU_timeseries_no_dp, GU_timeseries_grad_no_dp, GU_timeseries_stations_no_dp
+from feature.gatherup import GU2, GU_timeseries_slice2d, GU_timeseries_no_dp, GU_timeseries_grad_no_dp, GU_timeseries_stations_no_dp, GU_timeseries_streaming_grad_no_dp
 
 from feature.Q_criterion import Q_criterion
 
@@ -26,6 +26,9 @@ from feature.Q_criterion import Q_criterion
 from functions.bl import BL, BL_Coeff, BL_Coeff_hotmap
 from functions.duppts import Duplicate_Pts
 from functions.spod_field import SPOD
+#from functions.spod_field_cylinder import SPOD
+from functions.spod_field_Re200k import SPOD
+
 from functions.wavenumtrans import Wavenumber_Trans
 from functions.directivity import Directivity
 from functions.correlation import Correlation
@@ -80,9 +83,9 @@ def main():
     if 'feature-bl' in cfg.sections():
         fname = 'feature-bl'
         #Duplicate_Pts(arg).main_proc()
-        #BL(arg, cfg, fname).main_proc()
+        BL(arg, cfg, fname).main_proc()
         #BL_Coeff(arg, cfg, fname).main_proc()
-        BL_Coeff_hotmap(arg, cfg, fname).main_proc()
+        #BL_Coeff_hotmap(arg, cfg, fname).main_proc()
 
     if 'func-Q-criterion' in cfg.sections():
         fname = 'func-Q-criterion'
@@ -92,7 +95,9 @@ def main():
         #GU2(arg).main_proc()
         #GU_timeseries_slice2d(arg).main_proc()
         #GU_timeseries_no_dp(arg).main_proc()
-        GU_timeseries_grad_no_dp(arg).main_proc()
+        GU_timeseries_streaming_grad_no_dp(arg).main_proc()
+        #print('gradient dppts algo')
+        #GU_timeseries_grad_no_dp(arg).main_proc()
         #GU_timeseries_stations_no_dp(arg).main_proc()
 
     if 'feature-spod' in cfg.sections():
@@ -106,6 +111,11 @@ def main():
     if 'feature-wavenumber-trans' in cfg.sections():
         fname = 'feature-wavenumber-trans'
         Wavenumber_Trans(arg, cfg, fname).main_proc()
+
+    if 'feature-steamwise-eigen-value' in cfg.sections():
+        from functions.streamwise_eigen_value import Steamwise_eigenvalue_Trans
+        fname = 'feature-steamwise-eigen-value'
+        Steamwise_eigenvalue_Trans(arg, cfg, fname).main_proc()
 
     if 'feature-correlation' in cfg.sections():
         fname = 'feature-correlation'

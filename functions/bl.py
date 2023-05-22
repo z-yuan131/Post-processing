@@ -8,6 +8,7 @@ from matplotlib import ticker
 from matplotlib import colors
 from scipy.signal import welch, get_window
 
+plt.rcParams.update({'font.size': 12})
 
 from base import Base
 from pyfr.util import subclasses
@@ -254,6 +255,7 @@ class BL(BL_base):
 
     def _load_mesh_soln(self):
         f = h5py.File(f'{self.dir}/spanavg_mean.s','r')
+        #f = h5py.File(f'{self.dir}/slice2d_mean_80k_0.12.s','r')
         mesh = np.array(f['mesh'])
         soln = np.array(f['soln'])
         f.close()
@@ -288,7 +290,7 @@ class BL(BL_base):
         xmesh = []
         # Get location of profiles are plotted
         #xloc = [0.62, 0.75, 0.85, 0.94]
-        xloc = np.linspace(0.05, 0.99, 100)
+        xloc = np.linspace(0.05, 0.95, 100)
         for x in xloc:
             idx0 = np.where(meshw[:,0,1] > 0)[0]
             idx1 = np.where(meshw[:,0,0] > x*np.max(meshw[:,0,0]))[0][:1]
@@ -301,6 +303,10 @@ class BL(BL_base):
         solnw = self._interpolation(mesh, soln, meshw)
         self._sample_location(meshw, solnw, xmesh, xsoln)
         bledge = self._plot_session_bl_profile(xmesh, xsoln, xloc)
+
+        #f = h5py.File('bledge.h5','a')
+        #f['lower'] = np.array(bledge)
+        #f.close()
 
         # Plot field varibles
         self._plot_session_field(mesh, soln, mesh_wall, bledge)
@@ -325,6 +331,9 @@ class BL(BL_base):
         # Bad points on the wall
         index = [np.argsort(np.linalg.norm(mesh[:,:2] - msh[:2] , axis = 1))[0] for msh in meshw]
 
+        # Normalise stuff with chord length
+        mesh, bledge, self._trip_loc = mesh/100, bledge/100, self._trip_loc/100
+
         # Seperation bubble
         """
         v = np.linalg.norm(soln[:,[1,2]], axis = 1)
@@ -336,13 +345,17 @@ class BL(BL_base):
         """
         varname = ['rho','u','v','w','p']
         for i in [0,1,2,4]:
-            var = soln[:,i]
+            var = soln[:,i].copy()
+            bubble = soln[:,1].copy()
             levels = np.linspace(np.min(var),np.max(var),40)
 
             # Wall points
             var[index] = np.NaN
+            bubble[index] = np.NaN
+            bubble = np.ma.masked_invalid(bubble)
+            bubble = bubble.filled(fill_value=0.0)
 
-            plt.figure(figsize=(20,5))
+            plt.figure(figsize=(20,3))
             if self._trip_loc:
                 for j in range(2):
                     sln = var.copy()
@@ -356,10 +369,12 @@ class BL(BL_base):
                     sln = sln.filled(fill_value=-999)
 
                     triangle = tri.Triangulation(mesh[:,0],mesh[:,1])
-                    plt.tricontourf(triangle, sln.real, levels ,cmap = 'coolwarm') # coldwarm jets
+                    im = plt.tricontourf(triangle, sln.real, levels ,cmap = 'coolwarm') # coldwarm jets
 
-
-                    #plt.tricontour(triangle, soln[:,-1], levels=[0.0],cmap = 'Reds',linestyles='dashed')
+                    iidd = np.where(mesh[:,0] > 0.6)[0]
+                    triangle = tri.Triangulation(mesh[iidd,0],mesh[iidd,1])
+                    plt.tricontour(triangle, bubble[iidd], levels=np.array([0.0]),colors = 'magenta',linestyles='dashed')
+                    #plt.tricontour(triangle, bubble, levels=np.array([-999]),colors = 'black',linestyles='solid')
             else:
                 sln = var.copy()
                 sln = np.ma.masked_invalid(sln)
@@ -367,18 +382,21 @@ class BL(BL_base):
                 triangle = tri.Triangulation(mesh[:,0],mesh[:,1])
                 plt.tricontourf(triangle, sln.real, levels ,cmap = 'coolwarm') # coldwarm jets
 
-            cbar = plt.colorbar()
+            cbar = plt.colorbar(im)
 
             # Plot boundary layer edge
             if self._trip_loc:
                 idx = np.where(bledge[:,0] > self._trip_loc)[0]
-                plt.plot(bledge[idx,0],bledge[idx,1],'r--')
+                plt.plot(bledge[idx,0],bledge[idx,1],'k--')
                 idx = np.where(bledge[:,0] < self._trip_loc)[0]
-                plt.plot(bledge[idx,0],bledge[idx,1],'r--')
+                plt.plot(bledge[idx,0],bledge[idx,1],'k--')
             else:
-                plt.plot(bledge[idx,0],bledge[idx,1],'r--')
+                plt.plot(bledge[idx,0],bledge[idx,1],'k--')
 
-            plt.savefig(f'{self.dir}/figs/{varname[i]}_meanflow.eps')
+            plt.ylim([-0.1,0.1])
+            plt.xlim([-0.047,1.02])
+            plt.tight_layout()
+            plt.savefig(f'{self.dir}/figs/{varname[i]}_meanflow.png')
         plt.show()
 
 
@@ -404,8 +422,8 @@ class BL(BL_base):
                 msh = mesh.reshape(-1, self.ndims)
                 sln = sln.reshape(-1, self.nvars)
                 triangle = tri.Triangulation(msh[:,0],msh[:,1])
-                plt.tricontourf(triangle, sln[:,1], levels ,cmap = 'coolwarm') # coldwarm jets
-            cbar = plt.colorbar()
+                im = plt.tricontourf(triangle, sln[:,1], levels ,cmap = 'coolwarm') # coldwarm jets
+            cbar = plt.colorbar(im)
         # Probes location
         for i in range(xmesh.shape[0]):
             # Invalid position due to interpolation
@@ -827,6 +845,7 @@ class BL_Coeff(BL_base):
                     plt.plot(msh[:,0],_cp,'k-.')
         plt.xlabel('$x/c$')
         plt.ylabel('$-C_p$')
+        plt.tight_layout()
         plt.savefig(f'{self.dir}/figs/cp.eps')
         plt.figure()
         for k, v in cf.items():
@@ -838,7 +857,32 @@ class BL_Coeff(BL_base):
             plt.axhline(y = 0.0, color = 'b', linestyle = '--')
         plt.xlabel('$x/c$')
         plt.ylabel('$C_f$')
-        plt.savefig(f'{self.dir}/figs/cf.eps')
+
+        # Insert text
+        plt.figtext(0.75, 0.9, 'Re80k rough')
+
+        # Have a small plot inside
+        """
+        # location for the zoomed portion
+        sub_axes = plt.axes([.4, .2, .45, .35])
+
+        # plot the zoomed portion
+        for k, v in cf.items():
+            for msh, _cf in zip(mesh[k],v):
+                idx = np.where(msh[:,0] > 0.6528)[0]  # rough 0.7
+                idx1 = np.where(msh[idx,0] < 0.97739)[0] # rough 0.943
+                idx = idx[idx1]
+                if k == 0:
+                    sub_axes.plot(msh[idx,0], _cf[idx], 'r')
+                else:
+                    sub_axes.plot(msh[idx,0], _cf[idx], 'k-.')
+            plt.axhline(y = 0.0, color = 'b', linestyle = '--')
+        #"""
+
+
+
+        plt.tight_layout()
+        plt.savefig(f'{self.dir}/figs/cf_Re80k_rough.eps')
         plt.show()
 
         #"""
@@ -909,11 +953,11 @@ class BL_Coeff_hotmap(BL_base):
 
     def _load_mesh_soln(self):
         # A strict rule about element type here
-        f = h5py.File(f'{self.dir}/grad_mean.s','r')
-        #f = h5py.File(f'{self.dir}/grad_timesereis2.s','r')
+        #f = h5py.File(f'{self.dir}/grad_mean.s','r')
+        f = h5py.File(f'{self.dir}/grad_timesereis2.s','r')
         mesh = np.array(f['mesh'])
-        soln = np.array(f['soln'])
-        #soln = np.array(f['soln'])[100]
+        #soln = np.array(f['soln'])
+        soln = np.array(f['soln'])[101]
         f.close()
 
         mesh = mesh /self.L
@@ -977,23 +1021,59 @@ class BL_Coeff_hotmap(BL_base):
                 abound += [np.min(_cf),np.max(_cf)]
             levels = np.linspace(np.min(abound),np.max(abound),10)
 
-            plt.figure(figsize=(18,5))
+            plt.figure(figsize=(20,4))
             for mm, _cf in zip(mesh[i], cf[i]):
-                levels = np.linspace(np.min(_cf),np.max(_cf),50)
+
+                # Only plot the region close to the trailing edge
+                if any(mm[:,0] < 0.33):
+                    print(np.max(mm[:,0]))
+                    continue
+                #index = np.where(mm[:,0] > 0.45)[0]
+                #mm, _cf = mm[index], _cf[index]
+
+
+                #levels = np.linspace(np.min(_cf),np.max(_cf),50)
+                levels = np.linspace(-0.002,0.01,50)
 
                 print(mm.shape, _cf.shape)
                 triangle = tri.Triangulation(mm[:,0],mm[:,-1])
                 divnorm=colors.TwoSlopeNorm(vmin=np.min(levels), vcenter=0., vmax=np.max(levels))
-                plt.tricontourf(triangle, _cf,levels,cmap = 'coolwarm', norm=divnorm) # coldwarm jets
+                plt.tricontourf(triangle, _cf,levels,cmap = 'coolwarm', norm=divnorm,boundaries=[-0.005] + levels + [0.01],
+                                extend='both',
+                                extendfrac='auto',) # coldwarm jets
 
-            #plt.ylim([0.55,1])
+
+
+
+            cbar = plt.colorbar()
+
+            # plot zero contour line
+            for mm, _cf in zip(mesh[i], cf[i]):
+
+                # Only plot the region close to the trailing edge
+                if any(mm[:,0] < 0.33):
+                    print(np.max(mm[:,0]))
+                    continue
+
+                plt.tricontour(triangle, _cf,levels=np.array([0.0]),linestyles='dashed', colors='grey'
+)
+
+            #"""
+            # plot cylinders
+            index = np.where(abs(mm[:,1])>0.056)[0]
+            idx1 = np.where(mm[index,-1] < -0.09)[0]
+            triangle = tri.Triangulation(mm[index[idx1],0],mm[index[idx1],-1])
+            plt.tricontourf(triangle, np.zeros(len(index[idx1])), cmap = 'Greys')
+            idx1 = np.where(mm[index,-1] > -0.09)[0]
+            triangle = tri.Triangulation(mm[index[idx1],0],mm[index[idx1],-1])
+            plt.tricontourf(triangle, np.zeros(len(index[idx1])), cmap = 'Greys')
+            #"""
+
             plt.xlabel('$x/c$')
             plt.ylabel('$z/c$')
 
-            cbar = plt.colorbar()
-            plt.gca().invert_yaxis()
-            plt.savefig(f'{self.dir}/figs/cf_hotmap_{side[i]}.eps')
-            #plt.tight_layout()
+            plt.savefig(f'{self.dir}/figs/cf_hotmap_{side[i]}_101.png')
+            plt.tight_layout()
             plt.show()
 
 

@@ -70,6 +70,51 @@ class SpanavgBase(Region):
             """
             ptsinfo = self._resort_mesh(mesh, lookup, gbox, lbox, cmesh)
 
+
+            """
+            import matplotlib.pyplot as plt
+            plt.figure()
+            for id, info in ptsinfo.items():
+                pts_t = []
+                for erank, idx, ids in info:
+                    pts = mesh[erank][:,idx].reshape(-1, self.ndims)
+                    Nptz = len(idx)*(self.order + 1)
+                    #print(len(ids)/Nptz)
+                    pts = pts[ids].reshape(Nptz, -1, self.ndims, order = 'F')
+                    pts_t.append(pts)
+                pts = np.concatenate(pts_t, axis = 0)
+                #pts = np.concatenate(pts_t, axis = 1)
+                plt.plot(pts[:,:,0],pts[:,:,1],'.')
+            plt.figure()
+            for id, info in ptsinfo.items():
+                pts_t = []
+                for erank, idx, ids in info:
+                    pts = mesh[erank][:,idx].reshape(-1, self.ndims)
+                    Nptz = len(idx)*(self.order + 1)
+                    #print(len(ids)/Nptz)
+                    pts = pts[ids].reshape(Nptz, -1, self.ndims, order = 'F')
+                    pts_t.append(pts)
+                pts = np.concatenate(pts_t, axis = 0)
+                #pts = np.concatenate(pts_t, axis = 1)
+                plt.plot(pts[:,:,0],pts[:,:,-1],'.')
+            #plt.show()
+            """
+
+            """
+            cmesh = [np.mean(msh, axis = 0) for msh in mesh]
+            mesh = np.concatenate(mesh, axis = 1)
+            cmesh = np.concatenate(cmesh, axis = 0)
+            index = np.where(abs(cmesh[:,-1] - np.min(cmesh[:,-1])) < 1e-4)[0]
+            plt.figure()
+            plt.plot(mesh[:,:,0],mesh[:,:,1],'.')
+            plt.figure()
+            plt.plot(mesh[:,:,0],mesh[:,:,-1],'.')
+            plt.show()
+            raise RuntimeError
+            #"""
+
+
+
             #"""
             import matplotlib.pyplot as plt
             plt.figure()
@@ -97,6 +142,7 @@ class SpanavgBase(Region):
                 #pts = np.concatenate(pts_t, axis = 1)
                 plt.plot(pts[:,0],pts[:,-1],'.')
             plt.show()
+            print(np.max(pts[:,-1]),np.min(pts[:,-1]))
             #"""
 
             #ptsinfo = self._resort_mesh(mesh, lookup, gbox, lbox)
@@ -223,6 +269,18 @@ class SpanavgBase(Region):
                 soln_op[etype] = self._get_soln_op(etype, nspts)
         return soln_op
 
+    def _con_to_pri(self, cons):
+        rho, E = cons[0], cons[-1]
+
+        # Divide momentum components by rho
+        vs = [rhov/rho for rhov in cons[1:-1]]
+
+        # Compute the pressure
+        gamma = self.cfg.getfloat('constants', 'gamma')
+        p = (gamma - 1)*(E - 0.5*rho*sum(v*v for v in vs))
+
+        return [rho] + vs + [p]
+
 
     def _load_soln(self, time, lookup, soln_op):
         soln = []
@@ -233,6 +291,7 @@ class SpanavgBase(Region):
 
             sln = np.array(f[kk])[...,idx]
             sln = np.einsum('ij, jkl -> ilk', soln_op[etype], sln)
+            sln = self._con_to_pri(sln.swapaxes(0,-1)).swapaxes(0,-1)
             soln.append(sln)
         f.close()
         return soln
@@ -325,12 +384,13 @@ class SpanavgBase(Region):
         pele = cmesh[index]
 
         # wake Region
+        #"""
+        if any(cmesh[:,0] - 108 > 0):
+            index = np.where(cmesh[:,0] - 108 > 0)[0]
+            amin = np.min(cmesh[index,-1])
+            index = np.where(abs(cmesh[:,-1] - amin) < self.tol)[0]
+            pele = np.concatenate((pele, cmesh[index]), axis = 0)
         """
-        index = np.where(cmesh[:,0] - 120 > 0)[0]
-        amin = np.min(cmesh[index,-1])
-        index = np.where(abs(cmesh[:,-1] - amin) < self.tol)[0]
-        pele = np.concatenate((pele, cmesh[index]), axis = 0)
-
         index = np.where(cmesh[:,0] - 10 < 0)[0]
         amin = np.min(cmesh[index,-1])
         index = np.where(abs(cmesh[:,-1] - amin) < self.tol)[0]
@@ -354,11 +414,11 @@ class SpanavgBase(Region):
         return ptsinfo
 
     def _refine_pts(self, ptsinfo, mesh, pts):
-        oinfo = defaultdict(list)
+        #import matplotlib.pyplot as plt
+        #plt.figure()
+        oinfo, ref_face = defaultdict(list), {}
         for id, inf in ptsinfo.items():
             pt = pts[id]
-            a = 0
-            b = []
             for erank, idx in inf:
                 msh = mesh[erank][:,idx]
 
@@ -369,9 +429,49 @@ class SpanavgBase(Region):
                 ids = np.where(dist < self.tol)[0]
                 idx, msh = idx[ids], msh[:,ids]
 
+
                 if len(idx) > 0:
                     # Reorder element points
+                    npts, neles, ndims = msh.shape
                     msh = msh.reshape(-1, self.ndims)
+
+                    # Reoder points inside one element
+                    #plt.plot(msh[:,0],msh[:,-1],'.')
+
+
+                    """
+                    msht = np.array([(msh[id,0],msh[id,1],msh[id,2]) for id in range(len(msh))],
+                        dtype=[('x', np.float64), ('y', np.float64), ('z', np.float64)])
+
+                    Nptz = int(len(idx)*(self.order + 1))
+                    Nptxy = int(len(msh)/Nptz)
+                    ids = np.argsort(msht, order=('z'))
+                    ids = ids.reshape(-1, Nptz, order = 'F').T
+
+                    idss = []
+                    for sid, idd in enumerate(ids):
+                        if (sid+1) % (self.order+1) == 0 and sid+1 != Nptz:
+                            idd = np.append(idd, ids[sid+1], axis = 0)
+                            stid = np.argsort(msht[idd], order=('x','y'))
+                            stid = stid.reshape(2, Nptxy)
+                            for tid in stid:
+                                idss.append(idd[tid])
+
+                        elif sid % (self.order+1) == 0 and sid != 0:
+                            continue
+                        else:
+                            idd = idd[np.argsort(msht[idd], order=('x','y'))]
+                            idss.append(idd)
+
+                    #for ids in idss:
+                    #    plt.plot(msh[ids,0],msh[ids,-1],'.')
+                    #plt.show()
+
+                    ids = np.array(idss).reshape(-1, order = 'F')
+                    #raise RuntimeError
+                    #"""
+
+
                     #ids = sorted(msh , key=lambda k: [k[2], k[1], k[0]])
                     #msh = np.array([(msh[id,0],msh[id,1],msh[id,2]) for id in range(len(msh))],
                     #    dtype=[('x', np.float64), ('y', np.float64), ('z', np.float64)])
@@ -380,25 +480,60 @@ class SpanavgBase(Region):
                     #msh = np.array([(r[id],msh[id,2]) for id in range(len(msh))],
                     #    dtype=[('x', np.float64), ('z', np.float64)])
                     #ids = np.argsort(msh, order=('x','z'))
-                    Nptz = int(len(idx)*(self.order + 1))
-                    Nptf = int(len(msh)/Nptz)
-                    ids = np.argsort(msh[:,-1])[:Nptf]
-                    fpts = sorted(msh[ids,:2], key=lambda k: [k[1], k[0]])
-                    tol = 0
-                    while len(ids) != Nptz*Nptf:
-                        tol += 1e-6
+
+                    if id not in ref_face:
+                        Nptz = int(len(idx)*(self.order + 1))
+                        Nptf = int(len(msh)/Nptz)
+                        ids = np.argsort(msh[:,-1])[:Nptf]
+                        fpts = sorted(msh[ids,:2], key=lambda k: [k[1], k[0]])
+                        ref_face[id] = fpts
+
+                    else:
+                        fpts = ref_face[id]
+
+                    #"""
+                    ids = []
+                    for fpt in fpts:
+                        tol, idd, Nptz = 1e-4, [], neles*(self.order + 1)
+                        while len(idd) != Nptz:
+                            tol += 1e-5
+                            idd = np.where(np.linalg.norm(fpt - msh[:,:2], axis = 1) < tol)[0]
+
+                            if tol > 1.5e-2 or len(idd) > Nptz:
+                                print(tol, len(idd), Nptz)
+                                import matplotlib.pyplot as plt
+                                plt.figure()
+                                plt.plot(msh[:,0],msh[:,1],'.')
+                                afpts = np.array(fpts)
+                                plt.plot(afpts[:,0],afpts[:,1],'.')
+                                plt.show()
+                                raise RuntimeError
+                        ids.append(idd)
+                    ids = np.concatenate(ids, axis = 0)
+                    #"""
+
+
+                    """
+                    tol = 1e-4
+                    while len(ids) != len(msh):
+                        tol += 1e-5
                         ids = [np.where(np.linalg.norm(pt - msh[:,:2], axis = 1) < tol)[0] for pt in fpts]
+                        #print([len(idd) for idd in ids], len(msh)/25)
                         ids = np.concatenate(ids, axis = 0)
-                        #print(tol)
-                        if tol > 1.5e-1:
+                        #print(tol, len(ids), len(msh))
+                        if tol > 1.5e-2:
                             print(tol, len(ids), Nptz*Nptf)
                             import matplotlib.pyplot as plt
                             plt.figure()
                             plt.plot(msh[:,0],msh[:,1],'.')
+                            afpts = np.array(fpts)
+                            plt.plot(afpts[:,0],afpts[:,1],'.')
                             plt.show()
                             raise RuntimeError
+                    #"""
                     oinfo[id].append((erank, idx, ids))
-
+        #plt.show()
+        #raise RuntimeError
         return oinfo
 
 

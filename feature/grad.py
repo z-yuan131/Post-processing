@@ -82,7 +82,12 @@ class Gradient(Region):
     def _post_proc_fields(self, vars, m0):
         ovars = []
         for id, fid in enumerate(m0):
-            ovars.append(fid @ vars[:,id])
+            temp = fid @ vars[:,id]
+            if len(vars) != 125:
+                if len(temp) != 25:
+                    ovars.append(temp)
+            else:
+                ovars.append(temp)
 
         return np.array(ovars).swapaxes(0,1)
 
